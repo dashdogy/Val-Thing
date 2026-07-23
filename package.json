@@ -1,0 +1,27 @@
+{
+  "name": "val-openai-local-bridge",
+  "version": "0.1.0",
+  "description": "A local OpenAI-compatible API bridge for an authenticated RMIT Val browser session.",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @val-bridge/protocol && npm run build -w @val-bridge/server && npm run build -w @val-bridge/extension",
+    "check": "npm run format:check && npm run typecheck && npm test && npm run build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "release:extension": "npm run format:check && npm run typecheck && npm test && npm run build -w @val-bridge/protocol && npm run build -w @val-bridge/server && npm run build:release -w @val-bridge/extension && node packages/extension/scripts/package.mjs",
+    "typecheck": "npm run typecheck -w @val-bridge/protocol && npm run typecheck -w @val-bridge/server && npm run typecheck -w @val-bridge/extension",
+    "test": "npm run test -w @val-bridge/server && npm run test -w @val-bridge/extension",
+    "start": "npm run start -w @val-bridge/server",
+    "dev": "npm run dev -w @val-bridge/server"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.6"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

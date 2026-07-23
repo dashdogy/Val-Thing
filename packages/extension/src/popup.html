@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Val OpenAI Bridge</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="mark">V</div>
+        <div>
+          <h1>Val Bridge</h1>
+          <p>OpenAI-compatible localhost relay</p>
+        </div>
+      </header>
+
+      <section class="status-card" aria-label="Bridge status">
+        <div class="status-row">
+          <span class="status-dot" id="companion-dot" aria-hidden="true"></span>
+          <div>
+            <strong>Companion</strong>
+            <span id="companion-status">Checking...</span>
+          </div>
+        </div>
+        <div class="status-row">
+          <span class="status-dot" id="session-dot" aria-hidden="true"></span>
+          <div>
+            <strong>Val session</strong>
+            <span id="session-status">Checking...</span>
+          </div>
+        </div>
+        <div class="status-row">
+          <span class="status-dot" id="socket-dot" aria-hidden="true"></span>
+          <div>
+            <strong>Chat relay</strong>
+            <span id="socket-status">Checking...</span>
+          </div>
+        </div>
+      </section>
+
+      <form id="pairing-panel">
+        <label for="bridge-url">Companion URL</label>
+        <input
+          id="bridge-url"
+          type="url"
+          value="http://127.0.0.1:8787"
+          aria-describedby="bridge-url-hint"
+          autocomplete="url"
+          spellcheck="false"
+          required
+        />
+        <span class="field-hint" id="bridge-url-hint">IPv4 loopback only</span>
+        <label for="pairing-code">Five-minute pairing code</label>
+        <div class="pair-row">
+          <input
+            id="pairing-code"
+            type="text"
+            inputmode="numeric"
+            maxlength="6"
+            pattern="[0-9]{6}"
+            autocomplete="one-time-code"
+            placeholder="000000"
+            required
+          />
+          <button id="pair-button" type="submit">Pair</button>
+        </div>
+      </form>
+
+      <section class="endpoint" id="endpoint-panel" hidden>
+        <span>API base</span>
+        <code id="api-base">http://127.0.0.1:8787/v1</code>
+      </section>
+
+      <p class="error" id="error" role="alert" hidden></p>
+
+      <footer>
+        <button class="secondary" id="open-val" type="button">Open Val</button>
+        <span class="version" id="version"></span>
+        <button class="danger-link" id="unpair" type="button" hidden>
+          Unpair
+        </button>
+      </footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
