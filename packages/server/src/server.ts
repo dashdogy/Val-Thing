@@ -36,6 +36,7 @@ import {
   responseRequestToRelay,
   titleFromMessages,
 } from "./openai-schema.js";
+import { configureOpenCode } from "./opencode-config.js";
 import { ResponsesAdapter } from "./responses-adapter.js";
 import { Semaphore } from "./semaphore.js";
 
@@ -297,6 +298,11 @@ export class ValBridgeServer {
         await this.handlePair(request, response, corsHeaders);
         return;
       }
+      if (method === "POST" && url.pathname === "/bridge/configure-opencode") {
+        this.authenticateExtensionControl(request);
+        await this.handleConfigureOpenCode(response, corsHeaders);
+        return;
+      }
 
       if (url.pathname.startsWith("/v1/")) {
         this.authenticateClient(request);
@@ -375,6 +381,27 @@ export class ValBridgeServer {
     }
   }
 
+  private authenticateExtensionControl(request: IncomingMessage) {
+    const configured = this.secrets.get();
+    const extensionId = this.extensionIdFromOrigin(
+      request.headers.origin ?? "",
+    );
+    const token = bearerToken(request);
+    if (
+      !configured.extensionId ||
+      extensionId !== configured.extensionId ||
+      !token ||
+      !safeEqual(token, configured.bridgeSecret)
+    ) {
+      throw new OpenAIHttpError(
+        401,
+        "invalid_bridge_authentication",
+        "The extension control request is not authenticated.",
+        "authentication_error",
+      );
+    }
+  }
+
   private async handlePair(
     request: IncomingMessage,
     response: ServerResponse,
@@ -447,6 +474,30 @@ export class ValBridgeServer {
     } catch {
       return null;
     }
+  }
+
+  private async handleConfigureOpenCode(
+    response: ServerResponse,
+    headers: Record<string, string>,
+  ) {
+    const modelResult = await this.hub.execute({ kind: "models" });
+    const result = await configureOpenCode({
+      baseURL: `${this.baseUrl}/v1`,
+      clientApiKey: this.secrets.get().clientApiKey,
+      models: modelResult.models ?? [],
+    });
+    json(
+      response,
+      200,
+      {
+        configured: true,
+        provider_id: result.providerId,
+        models_configured: result.modelsConfigured,
+        updated: result.updated,
+        backup_created: Boolean(result.backupPath),
+      },
+      headers,
+    );
   }
 
   private async handleModels(

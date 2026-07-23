@@ -281,10 +281,12 @@ try {
     assert.equal(health.status, "degraded");
     assert.match(launcherError, /Update check failed/);
   } finally {
-    const exited = new Promise((resolvePromise) =>
-      launcher.once("exit", resolvePromise),
-    );
-    launcher.kill("SIGTERM");
+    const alreadyExited =
+      launcher.exitCode !== null || launcher.signalCode !== null;
+    const exited = alreadyExited
+      ? Promise.resolve()
+      : new Promise((resolvePromise) => launcher.once("exit", resolvePromise));
+    if (!alreadyExited) launcher.kill("SIGTERM");
     await exited;
   }
 
@@ -292,6 +294,10 @@ try {
     `Portable release verified on ${process.platform}: v${manifest.version}, npx install/update idempotent, offline fallback healthy.`,
   );
 } finally {
-  await new Promise((resolvePromise) => mockServer.close(resolvePromise));
+  const closed = new Promise((resolvePromise) =>
+    mockServer.close(resolvePromise),
+  );
+  mockServer.closeAllConnections();
+  await closed;
   await rm(temporaryRoot, { recursive: true, force: true });
 }

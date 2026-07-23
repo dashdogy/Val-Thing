@@ -35,6 +35,8 @@ Stores the RMIT token in memory-backed session storage and retains only the loca
 
 Displays the companion's client API key behind a masked reveal/copy control after the local bridge authenticates; the key is not persisted by the extension.
 
+Provides a user-triggered button that asks the local companion to merge the endpoint, API key, and current models into the user's OpenCode configuration with a backup.
+
 ### `https://val.rmit.edu.au/*`
 
 Reads the active Val session and communicates with Val's model, chat, task, and Socket.IO services. No other website is matched.

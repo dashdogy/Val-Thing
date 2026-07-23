@@ -1455,6 +1455,57 @@ async function pairBridge(code: string, rawUrl: string) {
   await connectBridge();
 }
 
+async function configureOpenCode() {
+  const { secret, url } = await getBridgeSettings();
+  if (!secret) {
+    throw new Error("Pair the extension with the companion first.");
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  let response: Response;
+  try {
+    response = await fetch(`${url}/bridge/configure-opencode`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${secret}` },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("OpenCode configuration timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const body = (await response.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  const error =
+    body.error && typeof body.error === "object"
+      ? (body.error as Record<string, unknown>)
+      : {};
+  if (
+    !response.ok ||
+    body.configured !== true ||
+    typeof body.models_configured !== "number" ||
+    typeof body.updated !== "boolean"
+  ) {
+    throw new Error(
+      typeof error.message === "string"
+        ? error.message
+        : "The companion could not configure OpenCode.",
+    );
+  }
+  return {
+    modelsConfigured: body.models_configured,
+    updated: body.updated,
+    backupCreated: body.backup_created === true,
+  };
+}
+
 async function popupStatus(): Promise<PopupStatus> {
   const settings = await getBridgeSettings();
   return {
@@ -1525,6 +1576,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       clientApiKey = "";
       updateBadge();
       return { ok: true };
+    }
+    if (message?.type === "POPUP_CONFIGURE_OPENCODE") {
+      return { ok: true, result: await configureOpenCode() };
     }
     if (message?.type === "POPUP_OPEN_VAL") {
       const tabs = await chrome.tabs.query({ url: `${VAL_ORIGIN}/*` });

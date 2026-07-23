@@ -357,6 +357,18 @@ button:disabled {
   line-height: 1.35;
 }
 
+.opencode-config button {
+  width: 100%;
+  min-height: 34px;
+}
+
+.opencode-config p {
+  margin: 6px 1px 0;
+  color: #668078;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
 .error {
   margin: 13px 0 0;
   color: #a73d38;
@@ -488,6 +500,10 @@ footer {
 
   .credential-action:hover {
     background: rgba(255, 255, 255, 0.1);
+  }
+
+  .opencode-config p {
+    color: #93aaa3;
   }
 
   .secondary {

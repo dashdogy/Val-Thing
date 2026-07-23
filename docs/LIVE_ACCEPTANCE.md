@@ -12,6 +12,7 @@ history.
 - [ ] Open signed-in Val once.
 - [ ] The popup shows **Connected**, **Signed in**, and **Ready**.
 - [ ] The client API key is masked by default; **Show** reveals it and **Copy** matches the companion configuration.
+- [ ] **Configure OpenCode** preserves unrelated settings, adds the current Val models, and creates a backup before changing an existing config.
 - [ ] `GET /healthz` returns `status: "ok"` without identity values.
 - [ ] Authenticated `GET /v1/models` returns Val's current model list.
 
@@ -49,6 +50,7 @@ history.
 - [ ] `response-mappings.json` contains IDs and timestamps, not message bodies.
 - [ ] `chrome.storage.local` contains the bridge secret and companion URL only.
 - [ ] The client API key is absent from persistent extension storage.
+- [ ] The key appears in OpenCode's config only after the user presses **Configure OpenCode**.
 - [ ] `chrome.storage.session` may contain the Val token while Helium is
       running.
 - [ ] Companion logs and HTTP traffic never contain the RMIT bearer token.

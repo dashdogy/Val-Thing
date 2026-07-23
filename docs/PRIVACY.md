@@ -31,6 +31,7 @@ The companion binds only to IPv4 loopback. Prompts and responses remain between 
 - The companion sends the client API key only after the extension authenticates. The extension holds it in service-worker and popup memory for the masked reveal/copy control and does not persist it.
 - The companion stores its client API key, bridge secret, paired extension ID, and at most 1,000 response-to-Val-chat mappings under the user's local application-data directory.
 - The companion does not persist prompt or response bodies.
+- If the user presses **Configure OpenCode**, the companion writes its loopback endpoint, client API key, and current Val model metadata to the user's global OpenCode config. It creates a timestamped backup before changing an existing file.
 - A request with `store: true` may create a Val conversation in the user's RMIT Val account. The user controls that history through Val.
 
 ## Permissions
@@ -41,7 +42,7 @@ The companion binds only to IPv4 loopback. Prompts and responses remain between 
 
 ## User controls
 
-Users can unpair through the extension popup, remove the extension, delete `%LOCALAPPDATA%\ValOpenAIBridge`, and remove stored Val chats through Val. Removing the extension clears its session and local extension storage.
+Users can unpair through the extension popup, remove the extension, delete `%LOCALAPPDATA%\ValOpenAIBridge`, remove the `val` provider from their OpenCode config, and remove stored Val chats through Val. Removing the extension clears its session and local extension storage.
 
 Questions or deletion requests should be sent through the support contact published with the extension's distribution page.
 

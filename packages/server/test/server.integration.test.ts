@@ -464,6 +464,86 @@ test("an installed update asks the connected extension to reload once", async (t
   await assert.rejects(readFile(marker, "utf8"), { code: "ENOENT" });
 });
 
+test("authenticated extension control configures OpenCode without returning secrets", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-opencode-test-"),
+  );
+  const openCodePath = join(configDirectory, "opencode.jsonc");
+  const previousConfigPath = process.env.OPENCODE_CONFIG;
+  process.env.OPENCODE_CONFIG = openCodePath;
+  const server = await ValBridgeServer.create({
+    config: { port: 0, configDirectory },
+    quiet: true,
+  });
+  await server.listen();
+  const extension = new FakeValExtension(server);
+  await extension.pair();
+  await extension.connect();
+
+  t.after(async () => {
+    if (previousConfigPath === undefined) {
+      delete process.env.OPENCODE_CONFIG;
+    } else {
+      process.env.OPENCODE_CONFIG = previousConfigPath;
+    }
+    extension.close();
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  const unauthenticated = await fetch(
+    `${server.baseUrl}/bridge/configure-opencode`,
+    {
+      method: "POST",
+      headers: {
+        authorization: "Bearer wrong-secret",
+        origin: EXTENSION_ORIGIN,
+      },
+    },
+  );
+  assert.equal(unauthenticated.status, 401);
+
+  const configured = await fetch(
+    `${server.baseUrl}/bridge/configure-opencode`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${extension.bridgeSecret}`,
+        origin: EXTENSION_ORIGIN,
+      },
+    },
+  );
+  assert.equal(configured.status, 200);
+  const result = (await configured.json()) as Record<string, unknown>;
+  assert.deepEqual(result, {
+    configured: true,
+    provider_id: "val",
+    models_configured: 1,
+    updated: true,
+    backup_created: false,
+  });
+  assert.ok(!("client_api_key" in result));
+  assert.ok(!("config_path" in result));
+
+  const openCodeConfig = JSON.parse(await readFile(openCodePath, "utf8")) as {
+    provider: {
+      val: {
+        options: { baseURL: string; apiKey: string };
+        models: Record<string, unknown>;
+      };
+    };
+  };
+  assert.equal(
+    openCodeConfig.provider.val.options.baseURL,
+    `${server.baseUrl}/v1`,
+  );
+  assert.equal(
+    openCodeConfig.provider.val.options.apiKey,
+    server.secrets.get().clientApiKey,
+  );
+  assert.ok("val-test" in openCodeConfig.provider.val.models);
+});
+
 test("companion contract works through the official OpenAI JavaScript SDK", async (t) => {
   const configDirectory = await mkdtemp(join(tmpdir(), "val-bridge-test-"));
   const server = await ValBridgeServer.create({

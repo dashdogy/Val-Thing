@@ -38,6 +38,10 @@ const apiBase = element<HTMLElement>("#api-base");
 const apiKeyElement = element<HTMLElement>("#api-key");
 const toggleApiKeyButton = element<HTMLButtonElement>("#toggle-api-key");
 const copyApiKeyButton = element<HTMLButtonElement>("#copy-api-key");
+const configureOpenCodeButton = element<HTMLButtonElement>(
+  "#configure-opencode",
+);
+const openCodeStatus = element<HTMLElement>("#opencode-status");
 const urlInput = element<HTMLInputElement>("#bridge-url");
 const codeInput = element<HTMLInputElement>("#pairing-code");
 const pairButton = element<HTMLButtonElement>("#pair-button");
@@ -57,6 +61,7 @@ let refreshPending = false;
 let currentApiKey = "";
 let apiKeyVisible = false;
 let copyResetTimer: ReturnType<typeof setTimeout> | undefined;
+let configurePending = false;
 
 function dot(element: HTMLElement, state: boolean | null) {
   element.classList.toggle("good", state === true);
@@ -176,6 +181,13 @@ async function refresh() {
     unpairButton.hidden = !status.bridgePaired;
     apiBase.textContent = `${status.bridgeUrl}/v1`;
     renderApiKey(status.clientApiKey);
+    configureOpenCodeButton.disabled =
+      configurePending ||
+      !status.bridgeConnected ||
+      !status.valSession ||
+      !status.valSocket ||
+      !status.compatible ||
+      !status.clientApiKey;
     renderUsage(status.stats);
     showError(status.lastError ?? "");
   } catch (error) {
@@ -212,6 +224,36 @@ copyApiKeyButton.addEventListener("click", async () => {
     }, 1_500);
   } catch (error) {
     showError(`Could not copy the API key: ${errorMessage(error)}`);
+  }
+});
+
+configureOpenCodeButton.addEventListener("click", async () => {
+  configurePending = true;
+  configureOpenCodeButton.disabled = true;
+  configureOpenCodeButton.textContent = "Configuring…";
+  openCodeStatus.textContent = "Reading current Val models…";
+  showError();
+  try {
+    const response = await message<{
+      ok: true;
+      result: {
+        modelsConfigured: number;
+        updated: boolean;
+        backupCreated: boolean;
+      };
+    }>({ type: "POPUP_CONFIGURE_OPENCODE" });
+    const count = response.result.modelsConfigured;
+    configureOpenCodeButton.textContent = "Configured";
+    openCodeStatus.textContent = response.result.updated
+      ? `Configured ${numberFormatter.format(count)} model${count === 1 ? "" : "s"}. Restart OpenCode to apply it.`
+      : `OpenCode already has the current ${numberFormatter.format(count)} model${count === 1 ? "" : "s"}.`;
+  } catch (error) {
+    configureOpenCodeButton.textContent = "Configure OpenCode";
+    openCodeStatus.textContent = "OpenCode was not changed.";
+    showError(errorMessage(error));
+  } finally {
+    configurePending = false;
+    await refresh();
   }
 });
 
