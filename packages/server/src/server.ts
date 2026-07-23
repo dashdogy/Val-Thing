@@ -4,7 +4,9 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { access, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 import { URL } from "node:url";
 import {
   PROTOCOL_VERSION,
@@ -136,6 +138,7 @@ export class ValBridgeServer {
   private readonly httpServer;
   private readonly websocketServer;
   private heartbeat?: NodeJS.Timeout;
+  private reloadWatcher?: NodeJS.Timeout;
   private pairingCompleted = false;
   private pairingFailures = 0;
 
@@ -200,6 +203,11 @@ export class ValBridgeServer {
     });
     this.heartbeat = setInterval(() => this.hub.ping(), 20_000);
     this.heartbeat.unref();
+    this.reloadWatcher = setInterval(() => {
+      void this.reloadUpdatedExtension();
+    }, 2_000);
+    this.reloadWatcher.unref();
+    void this.reloadUpdatedExtension();
 
     if (!this.quiet) {
       const secrets = this.secrets.get();
@@ -225,6 +233,7 @@ export class ValBridgeServer {
 
   async close() {
     if (this.heartbeat) clearInterval(this.heartbeat);
+    if (this.reloadWatcher) clearInterval(this.reloadWatcher);
     this.hub.close();
     for (const client of this.websocketServer.clients) {
       client.close(1001, "Companion shutting down");
@@ -232,6 +241,20 @@ export class ValBridgeServer {
     await new Promise<void>((resolve, reject) => {
       this.httpServer.close((error) => (error ? reject(error) : resolve()));
     });
+  }
+
+  private async reloadUpdatedExtension() {
+    const marker = join(this.config.configDirectory, "reload-extension");
+    try {
+      await access(marker);
+      if (this.hub.reloadExtension()) {
+        await rm(marker, { force: true });
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        // Update markers are advisory. A later interval can retry.
+      }
+    }
   }
 
   private async route(request: IncomingMessage, response: ServerResponse) {

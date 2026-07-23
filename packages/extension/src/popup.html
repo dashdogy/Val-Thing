@@ -40,6 +40,32 @@
         </div>
       </section>
 
+      <section class="usage-card" aria-label="Session usage">
+        <div class="usage-heading">
+          <span>Session usage</span>
+          <span class="usage-activity" id="usage-activity">Idle</span>
+        </div>
+        <div class="usage-total">
+          <strong id="total-tokens">0</strong>
+          <span>tokens</span>
+        </div>
+        <dl class="usage-breakdown">
+          <div>
+            <dt>Input</dt>
+            <dd id="input-tokens">0</dd>
+          </div>
+          <div>
+            <dt>Output</dt>
+            <dd id="output-tokens">0</dd>
+          </div>
+          <div>
+            <dt>Requests</dt>
+            <dd id="request-count">0</dd>
+          </div>
+        </dl>
+        <p class="usage-note" id="usage-note">Resets when the browser closes</p>
+      </section>
+
       <form id="pairing-panel">
         <label for="bridge-url">Companion URL</label>
         <input

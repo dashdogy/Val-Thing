@@ -1,41 +1,35 @@
 # Release guide
 
-## Build the extension package
+## Build the release
 
 Use Node.js 24 or newer from a clean checkout:
 
-```powershell
+```shell
 npm ci
-npm run release:extension
+npm run release:friend
 ```
 
-The command checks formatting, type-checks every workspace, runs the full test suite, builds the companion, creates a minified extension without source maps, validates the permission boundary, and writes:
+The command runs the full verification suite and writes:
 
 ```text
-release\val-openai-local-bridge-extension-<version>.zip
-release\val-openai-local-bridge-extension-<version>.zip.sha256
+release/install.mjs
+release/latest.json
+release/SHA256SUMS.txt
+release/val-openai-local-bridge-<version>.zip
+release/val-openai-local-bridge-extension-<version>.zip
 ```
 
-The ZIP is deterministic for an unchanged source tree and contains `manifest.json` at its root.
+The portable ZIP contains the bundled companion, updater, launcher, and unpacked extension. The standalone installer selects a conventional per-user directory on Windows, macOS, or Linux and verifies the release before extraction.
 
 ## Verify the package
 
-```powershell
-Get-FileHash .\release\val-openai-local-bridge-extension-0.1.0.zip -Algorithm SHA256
-$testDirectory = Join-Path $env:TEMP "val-bridge-release-check"
-Expand-Archive .\release\val-openai-local-bridge-extension-0.1.0.zip $testDirectory -Force
-Get-ChildItem $testDirectory -Recurse
+```shell
+npm run verify:release
 ```
 
-Confirm:
+This starts the bundled companion on a temporary port and runs the actual installer and updater against a temporary mock of the GitHub Releases API. The CI workflow repeats the full release build on Windows, macOS, and Linux.
 
-- the calculated hash matches the `.sha256` file;
-- icons exist at 16, 32, 48, and 128 pixels;
-- no `.ts` or `.map` files are present;
-- `manifest.json` requests only `storage`, exact Val access, and IPv4 loopback access; and
-- the unpacked directory loads without errors in Helium.
-
-Remove the temporary verification directory after inspection.
+The update channel is GitHub Releases. No separate website or update service is involved.
 
 ## Versioning
 
@@ -51,13 +45,12 @@ Add the release date and user-visible changes to `CHANGELOG.md`. The extension b
 
 Complete `docs/LIVE_ACCEPTANCE.md` against the exact release build. In particular, verify logout, cancellation, stored and stateless behavior, and the credential boundary.
 
-## Distribution checklist
+## Publish
 
-- Publish `docs/PRIVACY.md` at a stable HTTPS URL.
-- Configure a monitored support contact.
-- Prepare current screenshots and any required promotional assets.
-- Copy the single-purpose statement, permission justifications, and data disclosures from `docs/STORE_LISTING.md`.
-- Confirm that the selected public, unlisted, or private distribution mode is authorized for the RMIT account and use case.
-- Upload the generated ZIP; do not ZIP the `dist` directory itself with an extra parent folder.
+Pushing a version tag such as `v0.1.0` runs the release workflow. It rebuilds and verifies the artifacts, then creates the matching GitHub release. A friend needs Node.js 24 or newer and can run the attached installer with:
 
-The Chrome Web Store upload and RMIT authorization steps require the publisher's accounts and are intentionally not automated.
+```shell
+node install.mjs
+```
+
+The generated launchers check the latest GitHub release on startup, retain a working installed version when the update check is offline, and never copy local bridge credentials into release metadata.

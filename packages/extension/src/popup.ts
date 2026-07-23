@@ -6,6 +6,17 @@ type PopupStatus = {
   valSocket: boolean;
   compatible: boolean;
   lastError?: string;
+  stats: {
+    requests: number;
+    completedRequests: number;
+    failedRequests: number;
+    cancelledRequests: number;
+    meteredRequests: number;
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    activeRequests: number;
+  };
 };
 
 function element<T extends HTMLElement>(selector: string) {
@@ -30,6 +41,12 @@ const openValButton = element<HTMLButtonElement>("#open-val");
 const unpairButton = element<HTMLButtonElement>("#unpair");
 const errorElement = element<HTMLElement>("#error");
 const versionElement = element<HTMLElement>("#version");
+const usageActivity = element<HTMLElement>("#usage-activity");
+const totalTokens = element<HTMLElement>("#total-tokens");
+const inputTokens = element<HTMLElement>("#input-tokens");
+const outputTokens = element<HTMLElement>("#output-tokens");
+const requestCount = element<HTMLElement>("#request-count");
+const usageNote = element<HTMLElement>("#usage-note");
 
 let urlEdited = false;
 let refreshPending = false;
@@ -46,6 +63,36 @@ function showError(message = "") {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+const numberFormatter = new Intl.NumberFormat("en-AU");
+
+function tokenText(value: number, available: boolean) {
+  return available ? numberFormatter.format(value) : "—";
+}
+
+function renderUsage(stats: PopupStatus["stats"]) {
+  const usageAvailable = stats.requests === 0 || stats.meteredRequests > 0;
+  totalTokens.textContent = tokenText(stats.totalTokens, usageAvailable);
+  inputTokens.textContent = tokenText(stats.inputTokens, usageAvailable);
+  outputTokens.textContent = tokenText(stats.outputTokens, usageAvailable);
+  requestCount.textContent = numberFormatter.format(stats.requests);
+
+  usageActivity.textContent =
+    stats.activeRequests > 0
+      ? `${numberFormatter.format(stats.activeRequests)} active`
+      : "Idle";
+  usageActivity.classList.toggle("busy", stats.activeRequests > 0);
+
+  const unfinished = stats.failedRequests + stats.cancelledRequests;
+  usageNote.textContent =
+    stats.requests === 0
+      ? "Resets when the browser closes"
+      : stats.meteredRequests < stats.requests
+        ? `${numberFormatter.format(stats.meteredRequests)} of ${numberFormatter.format(stats.requests)} requests reported usage`
+        : unfinished > 0
+          ? `${numberFormatter.format(unfinished)} request${unfinished === 1 ? "" : "s"} did not complete`
+          : "Exact usage reported by Val";
 }
 
 async function message<T>(payload: Record<string, unknown>): Promise<T> {
@@ -94,6 +141,7 @@ async function refresh() {
     endpointPanel.hidden = !status.bridgePaired;
     unpairButton.hidden = !status.bridgePaired;
     apiBase.textContent = `${status.bridgeUrl}/v1`;
+    renderUsage(status.stats);
     showError(status.lastError ?? "");
   } catch (error) {
     showError(errorMessage(error));

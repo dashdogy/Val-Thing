@@ -18,7 +18,7 @@
 
 body {
   width: 360px;
-  min-height: 420px;
+  min-height: 540px;
   margin: 0;
   background:
     radial-gradient(
@@ -114,6 +114,109 @@ header p {
 .status-dot.bad {
   background: #d25b53;
   box-shadow: 0 0 0 3px rgba(210, 91, 83, 0.14);
+}
+
+.usage-card {
+  margin-top: 14px;
+  padding: 14px 15px 13px;
+  border: 1px solid #d9e7e2;
+  border-radius: 14px;
+  background: linear-gradient(
+    135deg,
+    rgba(230, 244, 239, 0.94),
+    rgba(248, 252, 250, 0.92)
+  );
+}
+
+.usage-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #557069;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.usage-activity {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #74847f;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.usage-activity::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #a6b3af;
+  content: "";
+}
+
+.usage-activity.busy {
+  color: #1d745f;
+}
+
+.usage-activity.busy::before {
+  background: #24966f;
+  box-shadow: 0 0 0 3px rgba(36, 150, 111, 0.12);
+}
+
+.usage-total {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.usage-total strong {
+  color: #153e34;
+  font-size: 27px;
+  font-weight: 760;
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+
+.usage-total span {
+  color: #668078;
+  font-size: 11px;
+}
+
+.usage-breakdown {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 13px 0 0;
+}
+
+.usage-breakdown div {
+  padding-top: 9px;
+  border-top: 1px solid rgba(52, 111, 94, 0.13);
+}
+
+.usage-breakdown dt {
+  color: #72867f;
+  font-size: 9px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.045em;
+}
+
+.usage-breakdown dd {
+  margin: 3px 0 0;
+  color: #294c42;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.usage-note {
+  margin: 10px 0 0;
+  color: #778a84;
+  font-size: 9px;
+  line-height: 1.35;
 }
 
 #pairing-panel {
@@ -282,6 +385,34 @@ footer {
   .status-card {
     border-color: #2b3734;
     background: rgba(25, 34, 32, 0.88);
+  }
+
+  .usage-card {
+    border-color: #2d4540;
+    background: linear-gradient(
+      135deg,
+      rgba(24, 55, 47, 0.95),
+      rgba(22, 38, 34, 0.94)
+    );
+  }
+
+  .usage-heading,
+  .usage-total span,
+  .usage-breakdown dt,
+  .usage-note {
+    color: #93aaa3;
+  }
+
+  .usage-total strong {
+    color: #d9f2e9;
+  }
+
+  .usage-breakdown div {
+    border-top-color: rgba(154, 207, 190, 0.14);
+  }
+
+  .usage-breakdown dd {
+    color: #c5e2d9;
   }
 
   input {

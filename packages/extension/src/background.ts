@@ -27,12 +27,21 @@ import {
   type BuiltHistory,
   type ParsedClientToolCall,
 } from "./relay-utils.js";
+import {
+  createSessionUsageStats,
+  recordUsageRequest,
+  restoreSessionUsageStats,
+  settleUsageRequest,
+  type SessionUsageStats,
+  type UsageOutcome,
+} from "./usage-stats.js";
 
 const VAL_ORIGIN = "https://val.rmit.edu.au";
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:8787";
 const SESSION_TOKEN_KEY = "valSessionToken";
 const BRIDGE_SECRET_KEY = "bridgeSecret";
 const BRIDGE_URL_KEY = "bridgeUrl";
+const USAGE_STATS_KEY = "usageStats";
 const TOKEN_MESSAGE = "VAL_SESSION_UPDATE";
 const GET_TOKEN_MESSAGE = "VAL_GET_SESSION_TOKEN";
 
@@ -40,6 +49,7 @@ type PopupStatus = ExtensionStatus & {
   bridgeConnected: boolean;
   bridgePaired: boolean;
   bridgeUrl: string;
+  stats: SessionUsageStats & { activeRequests: number };
 };
 
 type MutableToolCall = {
@@ -67,6 +77,7 @@ type PendingCompletion = {
   taskId?: string;
   finished: boolean;
   cancelRequested: boolean;
+  statsSettled: boolean;
 };
 
 let valToken = "";
@@ -79,6 +90,8 @@ let bridgeReconnectDelay = 1_000;
 let modelCache: { expiresAt: number; models: ValModel[] } | null = null;
 const pendingByRequest = new Map<string, PendingCompletion>();
 const pendingByMessage = new Map<string, PendingCompletion>();
+let usageStats = createSessionUsageStats();
+let usageStatsWrite: Promise<void> = Promise.resolve();
 
 function pendingMessageKey(
   sessionId: string,
@@ -86,6 +99,28 @@ function pendingMessageKey(
   messageId: string,
 ) {
   return `${sessionId}:${chatId}:${messageId}`;
+}
+
+function persistUsageStats() {
+  const snapshot = { ...usageStats };
+  usageStatsWrite = usageStatsWrite
+    .catch(() => undefined)
+    .then(() => chrome.storage.session.set({ [USAGE_STATS_KEY]: snapshot }));
+}
+
+function recordPendingRequest() {
+  usageStats = recordUsageRequest(usageStats);
+  persistUsageStats();
+}
+
+function settlePendingRequest(
+  pending: PendingCompletion,
+  outcome: UsageOutcome,
+) {
+  if (pending.statsSettled) return;
+  pending.statsSettled = true;
+  usageStats = settleUsageRequest(usageStats, pending.usage, outcome);
+  persistUsageStats();
 }
 
 let extensionStatus: ExtensionStatus = {
@@ -527,6 +562,9 @@ async function handleBridgeMessage(message: ServerToExtensionMessage) {
     case "bridge.ping":
       sendBridge({ type: "bridge.pong", timestamp: message.timestamp });
       break;
+    case "bridge.reload":
+      chrome.runtime.reload();
+      break;
     case "relay.request":
       void handleRelayRequest(message.id, message.request);
       break;
@@ -688,12 +726,14 @@ async function startCompletion(
     toolCalls: new Map(),
     finished: false,
     cancelRequested: false,
+    statsSettled: false,
   };
   pendingByRequest.set(requestId, pending);
   pendingByMessage.set(
     pendingMessageKey(sessionId, chatId, built.assistantMessageId),
     pending,
   );
+  recordPendingRequest();
 
   sendBridge({
     type: "relay.accepted",
@@ -1189,6 +1229,7 @@ async function finishCompletion(pending: PendingCompletion) {
   try {
     emitBufferedClientToolResult(pending);
   } catch (error) {
+    settlePendingRequest(pending, "failed");
     cleanupPending(pending);
     const normalized = relayError(error, "invalid_tool_bridge_response");
     sendBridge({
@@ -1249,6 +1290,7 @@ async function finishCompletion(pending: PendingCompletion) {
     }
   } catch (error) {
     if (pending.stored) {
+      settlePendingRequest(pending, "failed");
       cleanupPending(pending);
       sendBridge({
         type: "relay.error",
@@ -1264,6 +1306,7 @@ async function finishCompletion(pending: PendingCompletion) {
     }
   }
 
+  settlePendingRequest(pending, "completed");
   cleanupPending(pending);
   sendBridge({
     type: "relay.done",
@@ -1297,6 +1340,7 @@ async function finishCompletion(pending: PendingCompletion) {
 function failCompletion(pending: PendingCompletion, error: RelayError) {
   if (pending.finished) return;
   pending.finished = true;
+  settlePendingRequest(pending, "failed");
   cleanupPending(pending);
   sendBridge({ type: "relay.error", id: pending.requestId, error });
 }
@@ -1314,9 +1358,10 @@ function cleanupPending(pending: PendingCompletion) {
 
 async function cancelRelay(requestId: string) {
   const pending = pendingByRequest.get(requestId);
-  if (!pending) return;
+  if (!pending || pending.finished) return;
   pending.cancelRequested = true;
   pending.finished = true;
+  settlePendingRequest(pending, "cancelled");
   if (pending.taskId) {
     await stopValTask(pending.taskId);
     cleanupPending(pending);
@@ -1405,6 +1450,12 @@ async function popupStatus(): Promise<PopupStatus> {
     bridgeConnected: bridgeAuthenticated,
     bridgePaired: Boolean(settings.secret),
     bridgeUrl: settings.url,
+    stats: {
+      ...usageStats,
+      activeRequests: [...pendingByRequest.values()].filter(
+        (pending) => !pending.finished,
+      ).length,
+    },
   };
 }
 
@@ -1488,7 +1539,11 @@ async function bootstrap() {
   await chrome.storage.session.setAccessLevel({
     accessLevel: "TRUSTED_CONTEXTS",
   });
-  const stored = await chrome.storage.session.get(SESSION_TOKEN_KEY);
+  const stored = await chrome.storage.session.get([
+    SESSION_TOKEN_KEY,
+    USAGE_STATS_KEY,
+  ]);
+  usageStats = restoreSessionUsageStats(stored[USAGE_STATS_KEY]);
   if (
     typeof stored[SESSION_TOKEN_KEY] === "string" &&
     stored[SESSION_TOKEN_KEY]

@@ -9,4 +9,7 @@ All notable changes to Val OpenAI Local Bridge are documented here.
 - Added streaming, visible reasoning summaries, structured output, vision URLs, function calls, cancellation, and stored continuations.
 - Added dynamic Val model discovery and OpenCode compatibility.
 - Added session-only Val credential handling and one-time extension pairing.
+- Added session-only token and request statistics to the extension popup.
 - Added deterministic extension ZIP packaging, store icons, checksums, and release documentation.
+- Added a checksum-verified installer, updater, and launcher for Windows, macOS, and Linux.
+- Added GitHub Releases automation and a three-OS packaging test matrix.

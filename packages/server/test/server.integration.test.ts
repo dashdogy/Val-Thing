@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -35,6 +35,7 @@ class FakeValExtension {
   readonly relayRequests: RelayCompletionRequest[] = [];
   readonly cancelledRequestIds: string[] = [];
   readonly heldRequestIds: string[] = [];
+  reloadRequests = 0;
   private chatCounter = 0;
 
   constructor(
@@ -127,6 +128,10 @@ class FakeValExtension {
     }
     if (message.type === "bridge.ping") {
       this.send({ type: "bridge.pong", timestamp: message.timestamp });
+      return;
+    }
+    if (message.type === "bridge.reload") {
+      this.reloadRequests += 1;
       return;
     }
     if (message.type === "relay.cancel") {
@@ -427,6 +432,34 @@ function pairingFetch(
     }),
   });
 }
+
+test("an installed update asks the connected extension to reload once", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-reload-test-"),
+  );
+  const marker = join(configDirectory, "reload-extension");
+  const server = await ValBridgeServer.create({
+    config: { port: 0, configDirectory },
+    quiet: true,
+  });
+  await writeFile(marker, "reload", "utf8");
+  await server.listen();
+  const extension = new FakeValExtension(server);
+  await extension.pair();
+  await extension.connect();
+
+  t.after(async () => {
+    extension.close();
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  await waitFor(
+    () => extension.reloadRequests === 1,
+    "extension update reload",
+  );
+  await assert.rejects(readFile(marker, "utf8"), { code: "ENOENT" });
+});
 
 test("companion contract works through the official OpenAI JavaScript SDK", async (t) => {
   const configDirectory = await mkdtemp(join(tmpdir(), "val-bridge-test-"));

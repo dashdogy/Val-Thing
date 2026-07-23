@@ -297,6 +297,17 @@ export class BridgeHub {
     }
   }
 
+  reloadExtension() {
+    if (
+      !this.active?.authenticated ||
+      this.active.socket.readyState !== this.active.socket.OPEN
+    ) {
+      return false;
+    }
+    this.sendActive({ type: "bridge.reload" });
+    return true;
+  }
+
   close(error?: RelayError) {
     if (this.active) {
       this.active.socket.close(1001, "Companion shutting down");

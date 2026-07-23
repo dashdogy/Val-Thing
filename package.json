@@ -8,17 +8,20 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @val-bridge/protocol && npm run build -w @val-bridge/server && npm run build -w @val-bridge/extension",
+    "build": "npm run build -w @val-bridge/protocol && npm run build -w @val-bridge/server && npm run build -w @val-bridge/extension && npm run build -w @val-bridge/installer",
     "check": "npm run format:check && npm run typecheck && npm test && npm run build",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "release:extension": "npm run format:check && npm run typecheck && npm test && npm run build -w @val-bridge/protocol && npm run build -w @val-bridge/server && npm run build:release -w @val-bridge/extension && node packages/extension/scripts/package.mjs",
-    "typecheck": "npm run typecheck -w @val-bridge/protocol && npm run typecheck -w @val-bridge/server && npm run typecheck -w @val-bridge/extension",
-    "test": "npm run test -w @val-bridge/server && npm run test -w @val-bridge/extension",
+    "release:friend": "npm run release:extension && npm run build -w @val-bridge/installer && node scripts/build-friend-release.mjs && npm run verify:release",
+    "verify:release": "node scripts/verify-portable-release.mjs",
+    "typecheck": "npm run typecheck -w @val-bridge/protocol && npm run build -w @val-bridge/protocol && npm run typecheck -w @val-bridge/server && npm run typecheck -w @val-bridge/extension && npm run typecheck -w @val-bridge/installer",
+    "test": "npm run test -w @val-bridge/server && npm run test -w @val-bridge/extension && npm run test -w @val-bridge/installer",
     "start": "npm run start -w @val-bridge/server",
     "dev": "npm run dev -w @val-bridge/server"
   },
   "devDependencies": {
+    "esbuild": "^0.28.1",
     "prettier": "^3.9.6"
   },
   "engines": {

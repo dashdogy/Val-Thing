@@ -138,6 +138,9 @@ export type ServerToExtensionMessage =
   | {
       type: "bridge.ping";
       timestamp: number;
+    }
+  | {
+      type: "bridge.reload";
     };
 
 export type ExtensionToServerMessage =
