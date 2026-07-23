@@ -134,6 +134,7 @@ export class BridgeHub {
         this.send(socket, {
           type: "bridge.authenticated",
           protocolVersion: PROTOCOL_VERSION,
+          clientApiKey: configured.clientApiKey,
         });
         return;
       }

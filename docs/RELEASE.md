@@ -13,13 +13,14 @@ The command runs the full verification suite and writes:
 
 ```text
 release/install.mjs
+release/install.tgz
 release/latest.json
 release/SHA256SUMS.txt
 release/val-openai-local-bridge-<version>.zip
 release/val-openai-local-bridge-extension-<version>.zip
 ```
 
-The portable ZIP contains the bundled companion, updater, launcher, and unpacked extension. The standalone installer selects a conventional per-user directory on Windows, macOS, or Linux and verifies the release before extraction.
+The portable ZIP contains the bundled companion, updater, launcher, and unpacked extension. Both installer forms select a conventional per-user directory on Windows, macOS, or Linux and verify the release before extraction. `install.tgz` is a minimal npm package for the one-line install command.
 
 ## Verify the package
 
@@ -47,10 +48,12 @@ Complete `docs/LIVE_ACCEPTANCE.md` against the exact release build. In particula
 
 ## Publish
 
-Pushing a version tag such as `v0.1.0` runs the release workflow. It rebuilds and verifies the artifacts, then creates the matching GitHub release. A friend needs Node.js 24 or newer and can run the attached installer with:
+Pushing a version tag such as `v0.1.0` runs the release workflow. It rebuilds and verifies the artifacts, then creates the matching GitHub release. A friend needs Node.js 24 or newer and can install directly from the latest GitHub Release with one cross-platform command:
 
 ```shell
-node install.mjs
+npx --yes https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz
 ```
+
+The attached `install.mjs` remains available for offline or manual handoff.
 
 The generated launchers check the latest GitHub release on startup, retain a working installed version when the update check is offline, and never copy local bridge credentials into release metadata.

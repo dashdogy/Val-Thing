@@ -32,6 +32,7 @@ async function waitFor(
 class FakeValExtension {
   socket?: WebSocket;
   bridgeSecret = "";
+  clientApiKey = "";
   readonly relayRequests: RelayCompletionRequest[] = [];
   readonly cancelledRequestIds: string[] = [];
   readonly heldRequestIds: string[] = [];
@@ -64,6 +65,7 @@ class FakeValExtension {
     };
     this.bridgeSecret = body.bridgeSecret;
     assert.equal(body.protocolVersion, PROTOCOL_VERSION);
+    assert.ok(!("clientApiKey" in body));
   }
 
   async connect() {
@@ -115,6 +117,7 @@ class FakeValExtension {
 
   private handleMessage(message: ServerToExtensionMessage) {
     if (message.type === "bridge.authenticated") {
+      this.clientApiKey = message.clientApiKey;
       this.send({
         type: "bridge.status",
         status: {
@@ -483,6 +486,7 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   });
 
   const apiKey = server.secrets.get().clientApiKey;
+  assert.equal(extension.clientApiKey, apiKey);
   const client = new OpenAI({
     apiKey,
     baseURL: `${server.baseUrl}/v1`,

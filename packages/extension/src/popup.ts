@@ -2,6 +2,7 @@ type PopupStatus = {
   bridgeConnected: boolean;
   bridgePaired: boolean;
   bridgeUrl: string;
+  clientApiKey?: string;
   valSession: boolean;
   valSocket: boolean;
   compatible: boolean;
@@ -34,6 +35,9 @@ const socketStatus = element<HTMLSpanElement>("#socket-status");
 const pairingPanel = element<HTMLFormElement>("#pairing-panel");
 const endpointPanel = element<HTMLElement>("#endpoint-panel");
 const apiBase = element<HTMLElement>("#api-base");
+const apiKeyElement = element<HTMLElement>("#api-key");
+const toggleApiKeyButton = element<HTMLButtonElement>("#toggle-api-key");
+const copyApiKeyButton = element<HTMLButtonElement>("#copy-api-key");
 const urlInput = element<HTMLInputElement>("#bridge-url");
 const codeInput = element<HTMLInputElement>("#pairing-code");
 const pairButton = element<HTMLButtonElement>("#pair-button");
@@ -50,6 +54,9 @@ const usageNote = element<HTMLElement>("#usage-note");
 
 let urlEdited = false;
 let refreshPending = false;
+let currentApiKey = "";
+let apiKeyVisible = false;
+let copyResetTimer: ReturnType<typeof setTimeout> | undefined;
 
 function dot(element: HTMLElement, state: boolean | null) {
   element.classList.toggle("good", state === true);
@@ -93,6 +100,33 @@ function renderUsage(stats: PopupStatus["stats"]) {
         : unfinished > 0
           ? `${numberFormatter.format(unfinished)} request${unfinished === 1 ? "" : "s"} did not complete`
           : "Exact usage reported by Val";
+}
+
+function renderApiKey(apiKey?: string) {
+  const nextApiKey = apiKey ?? "";
+  if (nextApiKey !== currentApiKey) {
+    currentApiKey = nextApiKey;
+    apiKeyVisible = false;
+  }
+
+  const available = currentApiKey.length > 0;
+  apiKeyElement.textContent = !available
+    ? "Companion unavailable"
+    : apiKeyVisible
+      ? currentApiKey
+      : `${"•".repeat(16)}${currentApiKey.slice(-4)}`;
+  apiKeyElement.setAttribute(
+    "aria-label",
+    !available
+      ? "Client API key unavailable"
+      : apiKeyVisible
+        ? "Client API key visible"
+        : "Client API key hidden",
+  );
+  toggleApiKeyButton.disabled = !available;
+  copyApiKeyButton.disabled = !available;
+  toggleApiKeyButton.textContent = apiKeyVisible ? "Hide" : "Show";
+  toggleApiKeyButton.setAttribute("aria-pressed", String(apiKeyVisible));
 }
 
 async function message<T>(payload: Record<string, unknown>): Promise<T> {
@@ -141,6 +175,7 @@ async function refresh() {
     endpointPanel.hidden = !status.bridgePaired;
     unpairButton.hidden = !status.bridgePaired;
     apiBase.textContent = `${status.bridgeUrl}/v1`;
+    renderApiKey(status.clientApiKey);
     renderUsage(status.stats);
     showError(status.lastError ?? "");
   } catch (error) {
@@ -156,6 +191,28 @@ urlInput.addEventListener("input", () => {
 
 codeInput.addEventListener("input", () => {
   codeInput.value = codeInput.value.replace(/\D/g, "").slice(0, 6);
+});
+
+toggleApiKeyButton.addEventListener("click", () => {
+  if (!currentApiKey) return;
+  apiKeyVisible = !apiKeyVisible;
+  renderApiKey(currentApiKey);
+});
+
+copyApiKeyButton.addEventListener("click", async () => {
+  if (!currentApiKey) return;
+  showError();
+  try {
+    await navigator.clipboard.writeText(currentApiKey);
+    copyApiKeyButton.textContent = "Copied";
+    if (copyResetTimer) clearTimeout(copyResetTimer);
+    copyResetTimer = setTimeout(() => {
+      copyApiKeyButton.textContent = "Copy";
+      copyResetTimer = undefined;
+    }, 1_500);
+  } catch (error) {
+    showError(`Could not copy the API key: ${errorMessage(error)}`);
+  }
 });
 
 pairingPanel.addEventListener("submit", async (event) => {

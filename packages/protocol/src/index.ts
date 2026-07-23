@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -125,6 +125,7 @@ export type ServerToExtensionMessage =
   | {
       type: "bridge.authenticated";
       protocolVersion: number;
+      clientApiKey: string;
     }
   | {
       type: "relay.request";

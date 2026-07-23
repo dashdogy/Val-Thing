@@ -33,6 +33,8 @@ The separately installed Node 24 companion is required. Use remains subject to R
 
 Stores the RMIT token in memory-backed session storage and retains only the locally generated bridge secret and companion URL in local extension storage.
 
+Displays the companion's client API key behind a masked reveal/copy control after the local bridge authenticates; the key is not persisted by the extension.
+
 ### `https://val.rmit.edu.au/*`
 
 Reads the active Val session and communicates with Val's model, chat, task, and Socket.IO services. No other website is matched.

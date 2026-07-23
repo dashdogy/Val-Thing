@@ -95,8 +95,31 @@
       </form>
 
       <section class="endpoint" id="endpoint-panel" hidden>
-        <span>API base</span>
-        <code id="api-base">http://127.0.0.1:8787/v1</code>
+        <div class="endpoint-block">
+          <span class="endpoint-title">API base</span>
+          <code id="api-base">http://127.0.0.1:8787/v1</code>
+        </div>
+        <div class="endpoint-block">
+          <div class="credential-heading">
+            <span class="endpoint-title">Client API key</span>
+            <div class="credential-actions">
+              <button
+                class="credential-action"
+                id="toggle-api-key"
+                type="button"
+                aria-pressed="false"
+              >
+                Show
+              </button>
+              <button class="credential-action" id="copy-api-key" type="button">
+                Copy
+              </button>
+            </div>
+          </div>
+          <code class="api-key" id="api-key" aria-live="polite"
+            >Connect companion</code
+          >
+        </div>
       </section>
 
       <p class="error" id="error" role="alert" hidden></p>

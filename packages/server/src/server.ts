@@ -210,9 +210,7 @@ export class ValBridgeServer {
     void this.reloadUpdatedExtension();
 
     if (!this.quiet) {
-      const secrets = this.secrets.get();
       console.log(`Val OpenAI Bridge listening at ${this.baseUrl}/v1`);
-      console.log(`Client API key: ${secrets.clientApiKey}`);
       console.log(
         `Extension pairing code: ${this.pairingCode} (expires in five minutes)`,
       );

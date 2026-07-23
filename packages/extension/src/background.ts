@@ -49,6 +49,7 @@ type PopupStatus = ExtensionStatus & {
   bridgeConnected: boolean;
   bridgePaired: boolean;
   bridgeUrl: string;
+  clientApiKey?: string;
   stats: SessionUsageStats & { activeRequests: number };
 };
 
@@ -85,6 +86,7 @@ let valSocket: Socket | null = null;
 let valSocketToken = "";
 let bridgeSocket: WebSocket | null = null;
 let bridgeAuthenticated = false;
+let clientApiKey = "";
 let bridgeReconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let bridgeReconnectDelay = 1_000;
 let modelCache: { expiresAt: number; models: ValModel[] } | null = null;
@@ -495,10 +497,13 @@ async function connectBridge() {
     bridgeSocket = null;
     socket?.close();
     bridgeAuthenticated = false;
+    clientApiKey = "";
     updateBadge();
     return;
   }
   bridgeSocket?.close();
+  bridgeAuthenticated = false;
+  clientApiKey = "";
   const websocketUrl = `${url.replace("http://", "ws://")}/bridge/ws`;
   const socket = new WebSocket(websocketUrl);
   bridgeSocket = socket;
@@ -527,6 +532,7 @@ async function connectBridge() {
   socket.addEventListener("close", () => {
     if (bridgeSocket !== socket) return;
     bridgeAuthenticated = false;
+    clientApiKey = "";
     updateBadge();
     scheduleBridgeReconnect();
   });
@@ -550,11 +556,17 @@ function scheduleBridgeReconnect() {
 async function handleBridgeMessage(message: ServerToExtensionMessage) {
   switch (message.type) {
     case "bridge.authenticated":
-      if (message.protocolVersion !== PROTOCOL_VERSION) {
+      if (
+        message.protocolVersion !== PROTOCOL_VERSION ||
+        typeof message.clientApiKey !== "string" ||
+        !message.clientApiKey.startsWith("val-local-") ||
+        message.clientApiKey.length > 256
+      ) {
         bridgeSocket?.close();
         return;
       }
       bridgeAuthenticated = true;
+      clientApiKey = message.clientApiKey;
       bridgeReconnectDelay = 1_000;
       sendBridge({ type: "bridge.status", status: extensionStatus });
       updateBadge();
@@ -1450,6 +1462,7 @@ async function popupStatus(): Promise<PopupStatus> {
     bridgeConnected: bridgeAuthenticated,
     bridgePaired: Boolean(settings.secret),
     bridgeUrl: settings.url,
+    ...(clientApiKey ? { clientApiKey } : {}),
     stats: {
       ...usageStats,
       activeRequests: [...pendingByRequest.values()].filter(
@@ -1509,6 +1522,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       bridgeSocket = null;
       socket?.close();
       bridgeAuthenticated = false;
+      clientApiKey = "";
       updateBadge();
       return { ok: true };
     }

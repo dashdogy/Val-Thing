@@ -11,6 +11,7 @@ history.
 - [ ] Pair with the companion's current six-digit code.
 - [ ] Open signed-in Val once.
 - [ ] The popup shows **Connected**, **Signed in**, and **Ready**.
+- [ ] The client API key is masked by default; **Show** reveals it and **Copy** matches the companion configuration.
 - [ ] `GET /healthz` returns `status: "ok"` without identity values.
 - [ ] Authenticated `GET /v1/models` returns Val's current model list.
 
@@ -47,6 +48,7 @@ history.
       credentials but no RMIT bearer token.
 - [ ] `response-mappings.json` contains IDs and timestamps, not message bodies.
 - [ ] `chrome.storage.local` contains the bridge secret and companion URL only.
+- [ ] The client API key is absent from persistent extension storage.
 - [ ] `chrome.storage.session` may contain the Val token while Helium is
       running.
 - [ ] Companion logs and HTTP traffic never contain the RMIT bearer token.

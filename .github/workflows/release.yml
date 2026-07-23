@@ -42,6 +42,7 @@ jobs:
         run: |
           assets=(
             release/*.zip
+            release/*.tgz
             release/*.sha256
             release/install.mjs
             release/latest.json
@@ -53,5 +54,5 @@ jobs:
             gh release create "$RELEASE_TAG" "${assets[@]}" \
               --verify-tag \
               --title "$RELEASE_TAG" \
-              --notes "Requires Node.js 24 or newer. Download install.mjs, then run: node install.mjs"
+              --notes "Requires Node.js 24 or newer. Install with: npx --yes https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz"
           fi

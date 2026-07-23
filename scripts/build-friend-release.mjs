@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmod,
   cp,
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   stat,
   writeFile,
@@ -58,7 +60,7 @@ function buildTimestamp() {
   return new Date().toISOString();
 }
 
-async function bundle(entryPoint, outputFile) {
+async function bundle(entryPoint, outputFile, options = {}) {
   await build({
     entryPoints: [entryPoint],
     outfile: outputFile,
@@ -70,7 +72,7 @@ async function bundle(entryPoint, outputFile) {
     sourcemap: false,
     legalComments: "none",
     banner: {
-      js: 'import { createRequire as __createRequire } from "node:module"; const require = __createRequire(import.meta.url);',
+      js: `${options.executable ? "#!/usr/bin/env node\n" : ""}import { createRequire as __createRequire } from "node:module"; const require = __createRequire(import.meta.url);`,
     },
   });
 }
@@ -115,9 +117,11 @@ const publishedAt = buildTimestamp();
 const portableArchiveName = `val-openai-local-bridge-${version}.zip`;
 const extensionArchiveName = `val-openai-local-bridge-extension-${version}.zip`;
 const installerName = "install.mjs";
+const oneLineInstallerName = "install.tgz";
 const portableArchivePath = join(releaseDirectory, portableArchiveName);
 const extensionArchivePath = join(releaseDirectory, extensionArchiveName);
 const installerPath = join(releaseDirectory, installerName);
+const oneLineInstallerPath = join(releaseDirectory, oneLineInstallerName);
 
 await mkdir(releaseDirectory, { recursive: true });
 await mkdir(temporaryDirectory, { recursive: true });
@@ -139,8 +143,74 @@ try {
       join(installerSource, "update-cli.ts"),
       join(payloadRoot, "update.mjs"),
     ),
-    bundle(join(installerSource, "install-cli.ts"), installerPath),
+    bundle(join(installerSource, "install-cli.ts"), installerPath, {
+      executable: true,
+    }),
   ]);
+  await chmod(installerPath, 0o755);
+
+  const npmInstallerRoot = join(stagingRoot, "npm-installer");
+  const npmInstallerEntry = join(npmInstallerRoot, installerName);
+  await mkdir(npmInstallerRoot, { recursive: true });
+  await cp(installerPath, npmInstallerEntry);
+  await chmod(npmInstallerEntry, 0o755);
+  await writeFile(
+    join(npmInstallerRoot, "package.json"),
+    `${JSON.stringify(
+      {
+        name: "val-thing-installer",
+        version,
+        description: "Cross-platform Val Thing installer.",
+        type: "module",
+        bin: { "val-thing-install": installerName },
+        engines: { node: ">=24" },
+        repository: {
+          type: "git",
+          url: "git+https://github.com/dashdogy/Val-Thing.git",
+        },
+        license: "UNLICENSED",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const npmCli = process.env.npm_execpath;
+  if (!npmCli) {
+    throw new Error("npm_execpath is required to build install.tgz.");
+  }
+  const packed = await execFileAsync(
+    process.execPath,
+    [
+      npmCli,
+      "pack",
+      npmInstallerRoot,
+      "--pack-destination",
+      stagingRoot,
+      "--json",
+      "--ignore-scripts",
+    ],
+    {
+      cwd: projectRoot,
+      env: {
+        ...process.env,
+        npm_config_audit: "false",
+        npm_config_fund: "false",
+        npm_config_update_notifier: "false",
+      },
+    },
+  );
+  const packResult = JSON.parse(packed.stdout);
+  const packDetails = Array.isArray(packResult)
+    ? packResult[0]
+    : Object.values(packResult)[0];
+  const packedName = packDetails?.filename;
+  if (typeof packedName !== "string" || basename(packedName) !== packedName) {
+    throw new Error("npm pack did not return a safe package filename.");
+  }
+  await rm(oneLineInstallerPath, { force: true });
+  await rename(join(stagingRoot, packedName), oneLineInstallerPath);
 
   await cp(join(extensionRoot, "dist"), join(payloadRoot, "extension"), {
     recursive: true,
@@ -165,8 +235,10 @@ try {
   );
   const extensionDetails = await stat(extensionArchivePath);
   const installerDetails = await stat(installerPath);
+  const oneLineInstallerDetails = await stat(oneLineInstallerPath);
   const extensionSha256 = await sha256File(extensionArchivePath);
   const installerSha256 = await sha256File(installerPath);
+  const oneLineInstallerSha256 = await sha256File(oneLineInstallerPath);
   const latest = {
     schema_version: 1,
     version,
@@ -207,6 +279,7 @@ try {
       `${portableArchive.sha256}  ${portableArchiveName}`,
       `${extensionSha256}  ${extensionArchiveName}`,
       `${installerSha256}  ${installerName}`,
+      `${oneLineInstallerSha256}  ${oneLineInstallerName}`,
       `${latestSha256}  ${basename(latestPath)}`,
       "",
     ].join("\n"),
@@ -218,6 +291,9 @@ try {
   );
   console.log(`SHA-256: ${portableArchive.sha256}`);
   console.log(`Portable installer: ${installerPath}`);
+  console.log(
+    `One-line installer: ${oneLineInstallerPath} (${oneLineInstallerDetails.size} bytes)`,
+  );
   console.log(`Release manifest: ${latestPath}`);
 } finally {
   await rm(stagingRoot, { recursive: true, force: true });

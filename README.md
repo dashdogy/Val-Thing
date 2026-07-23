@@ -26,4 +26,8 @@ npm run check
 
 Packaged builds are published through the repository's Releases page.
 
+```shell
+npx --yes https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz
+```
+
 Use only with services and accounts you are authorized to access, and follow the applicable policies and terms.

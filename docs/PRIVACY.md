@@ -28,6 +28,7 @@ The companion binds only to IPv4 loopback. Prompts and responses remain between 
 
 - The Val session token is stored only in memory-backed `chrome.storage.session`. It is removed when the user signs out and is cleared when the extension is disabled, reloaded, updated, or the browser restarts.
 - `chrome.storage.local` stores only the companion URL and locally generated bridge secret.
+- The companion sends the client API key only after the extension authenticates. The extension holds it in service-worker and popup memory for the masked reveal/copy control and does not persist it.
 - The companion stores its client API key, bridge secret, paired extension ID, and at most 1,000 response-to-Val-chat mappings under the user's local application-data directory.
 - The companion does not persist prompt or response bodies.
 - A request with `store: true` may create a Val conversation in the user's RMIT Val account. The user controls that history through Val.

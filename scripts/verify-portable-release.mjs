@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { extractZip } from "../packages/installer/dist/zip.js";
 
 const projectRoot = resolve(import.meta.dirname, "..");
@@ -18,10 +18,16 @@ const portablePath = join(
 );
 const extensionPath = join(releaseDirectory, manifest.assets.extension.name);
 const installerPath = join(releaseDirectory, manifest.assets.installer.name);
+const oneLineInstallerPath = join(releaseDirectory, "install.tgz");
 const portable = await readFile(portablePath);
 const extension = await readFile(extensionPath);
 const installer = await readFile(installerPath);
+const oneLineInstaller = await readFile(oneLineInstallerPath);
 const latest = await readFile(join(releaseDirectory, "latest.json"));
+const checksums = await readFile(
+  join(releaseDirectory, "SHA256SUMS.txt"),
+  "utf8",
+);
 
 assert.equal(portable.length, manifest.assets.portable_bundle.size);
 assert.equal(
@@ -30,6 +36,12 @@ assert.equal(
 );
 assert.equal(extension.length, manifest.assets.extension.size);
 assert.equal(installer.length, manifest.assets.installer.size);
+assert.match(
+  checksums,
+  new RegExp(
+    `${createHash("sha256").update(oneLineInstaller).digest("hex")}  install\\.tgz`,
+  ),
+);
 
 const temporaryRoot = await mkdtemp(
   join(tmpdir(), "val-bridge-portable-test-"),
@@ -161,15 +173,37 @@ try {
   assert.ok(mockAddress && typeof mockAddress === "object");
   mockOrigin = `http://127.0.0.1:${mockAddress.port}`;
   const releaseApi = `${mockOrigin}/releases/latest`;
+  const npmCli = process.env.npm_execpath;
+  assert.ok(npmCli, "npm_execpath is required to verify install.tgz");
+  const npxCli = join(dirname(npmCli), "npx-cli.js");
+  const oneLineInstallerSpec = `./${relative(
+    projectRoot,
+    oneLineInstallerPath,
+  ).replaceAll("\\", "/")}`;
+  const npmEnvironment = {
+    npm_config_audit: "false",
+    npm_config_cache: join(temporaryRoot, "npm-cache"),
+    npm_config_fund: "false",
+    npm_config_update_notifier: "false",
+  };
 
-  const first = await runNode([
-    installerPath,
-    "--install-dir",
-    installRoot,
-    "--release-api",
-    releaseApi,
-  ]);
-  assert.match(first.stdout, /Installed Val Bridge/);
+  const first = await runNode(
+    [
+      npxCli,
+      "--yes",
+      oneLineInstallerSpec,
+      "--install-dir",
+      installRoot,
+      "--release-api",
+      releaseApi,
+    ],
+    npmEnvironment,
+  );
+  assert.match(
+    first.stdout,
+    /Installed Val Bridge/,
+    `npx installer output:\n${first.stdout}\n${first.stderr}`,
+  );
   const second = await runNode([
     installerPath,
     "--install-dir",
@@ -255,7 +289,7 @@ try {
   }
 
   console.log(
-    `Portable release verified on ${process.platform}: v${manifest.version}, install/update idempotent, offline fallback healthy.`,
+    `Portable release verified on ${process.platform}: v${manifest.version}, npx install/update idempotent, offline fallback healthy.`,
   );
 } finally {
   await new Promise((resolvePromise) => mockServer.close(resolvePromise));
