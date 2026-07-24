@@ -43,6 +43,7 @@ class FakeValExtension {
     readonly server: ValBridgeServer,
     readonly origin = EXTENSION_ORIGIN,
     readonly extensionId = EXTENSION_ID,
+    readonly modelId = "val-test",
   ) {}
 
   async pair() {
@@ -150,7 +151,7 @@ class FakeValExtension {
         result: {
           models: [
             {
-              id: "val-test",
+              id: this.modelId,
               name: "Val Test",
               created: 1_700_000_000,
               owned_by: "rmit-val",
@@ -436,6 +437,27 @@ function pairingFetch(
   });
 }
 
+test("binds all IPv4 interfaces while keeping a loopback client URL", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-network-test-"),
+  );
+  const server = await ValBridgeServer.create({
+    config: { port: 0, configDirectory },
+    quiet: true,
+  });
+  await server.listen();
+
+  t.after(async () => {
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  assert.equal(server.config.host, "0.0.0.0");
+  assert.equal(server.address?.address, "0.0.0.0");
+  assert.match(server.baseUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.equal((await fetch(`${server.baseUrl}/healthz`)).status, 200);
+});
+
 test("an installed update asks the connected extension to reload once", async (t) => {
   const configDirectory = await mkdtemp(
     join(tmpdir(), "val-bridge-reload-test-"),
@@ -461,7 +483,15 @@ test("an installed update asks the connected extension to reload once", async (t
     () => extension.reloadRequests === 1,
     "extension update reload",
   );
-  await assert.rejects(readFile(marker, "utf8"), { code: "ENOENT" });
+  await waitFor(async () => {
+    try {
+      await readFile(marker, "utf8");
+      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      throw error;
+    }
+  }, "extension update marker removal");
 });
 
 test("authenticated extension control configures OpenCode without returning secrets", async (t) => {
@@ -476,7 +506,12 @@ test("authenticated extension control configures OpenCode without returning secr
     quiet: true,
   });
   await server.listen();
-  const extension = new FakeValExtension(server);
+  const extension = new FakeValExtension(
+    server,
+    EXTENSION_ORIGIN,
+    EXTENSION_ID,
+    "openai-gpt-5.6-sol",
+  );
   await extension.pair();
   await extension.connect();
 
@@ -541,7 +576,9 @@ test("authenticated extension control configures OpenCode without returning secr
     openCodeConfig.provider.val.options.apiKey,
     server.secrets.get().clientApiKey,
   );
-  assert.ok("val-test" in openCodeConfig.provider.val.models);
+  assert.deepEqual(Object.keys(openCodeConfig.provider.val.models), [
+    "openai-gpt-5.6-sol",
+  ]);
 });
 
 test("companion contract works through the official OpenAI JavaScript SDK", async (t) => {

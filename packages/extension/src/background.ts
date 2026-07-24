@@ -121,7 +121,13 @@ function settlePendingRequest(
 ) {
   if (pending.statsSettled) return;
   pending.statsSettled = true;
-  usageStats = settleUsageRequest(usageStats, pending.usage, outcome);
+  usageStats = settleUsageRequest(
+    usageStats,
+    pending.usage,
+    outcome,
+    Date.now(),
+    pending.request.model,
+  );
   persistUsageStats();
 }
 

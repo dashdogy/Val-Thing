@@ -2,6 +2,19 @@
 
 All notable changes to Val OpenAI Local Bridge are documented here.
 
+## 0.1.1 - 2026-07-24
+
+- Changed the companion's default bind address to `0.0.0.0`, allowing
+  authenticated API clients on trusted local networks.
+- Kept extension pairing and automatic OpenCode configuration on IPv4
+  loopback.
+- Added explicit LAN security guidance and acceptance coverage.
+- Limited automatic OpenCode configuration to the OpenAI GPT-5.6 family,
+  including 1,050,000-token context and 128,000-token output limits.
+- Added encrypted reasoning-state settings to every GPT-5.6 `max` variant.
+- Added session-only OpenAI API-equivalent cost estimates to extension usage
+  statistics, including cached-token and long-context pricing adjustments.
+
 ## 0.1.0 - 2026-07-23
 
 - Added a Manifest V3 Helium extension scoped to RMIT Val and IPv4 loopback.

@@ -12,15 +12,28 @@ history.
 - [ ] Open signed-in Val once.
 - [ ] The popup shows **Connected**, **Signed in**, and **Ready**.
 - [ ] The client API key is masked by default; **Show** reveals it and **Copy** matches the companion configuration.
-- [ ] **Configure OpenCode** preserves unrelated settings, adds the current Val models, and creates a backup before changing an existing config.
+- [ ] **Configure OpenCode** preserves unrelated providers and settings, exports only OpenAI GPT-5.6 models, and creates a backup before changing an existing config.
+- [ ] Each configured GPT-5.6 model reports a 1,050,000-token context limit and 128,000-token output limit.
+- [ ] Every configured `max` variant includes `reasoningEffort: "max"`, `reasoningSummary: "auto"`, and `include: ["reasoning.encrypted_content"]`.
 - [ ] `GET /healthz` returns `status: "ok"` without identity values.
 - [ ] Authenticated `GET /v1/models` returns Val's current model list.
+
+## Local-network access
+
+- [ ] The companion reports that it is listening on `0.0.0.0:8787`.
+- [ ] From another device on a trusted local network, authenticated
+      `GET http://<host-LAN-IP>:8787/v1/models` succeeds.
+- [ ] The same LAN request without the client API key returns
+      `invalid_api_key`.
+- [ ] Browser requests from an unconfigured origin receive
+      `origin_not_allowed`.
 
 ## Stateless generation
 
 - [ ] Record the current visible Val history.
 - [ ] Send a Chat Completions request with `store` absent or `false`.
 - [ ] Confirm streaming and non-streaming output are OpenAI-shaped.
+- [ ] Confirm the popup updates its token totals and labelled OpenAI API-equivalent USD estimate.
 - [ ] Confirm no new visible Val conversation was created.
 
 ## Stored generation and continuation
@@ -51,8 +64,8 @@ history.
 - [ ] `chrome.storage.local` contains the bridge secret and companion URL only.
 - [ ] The client API key is absent from persistent extension storage.
 - [ ] The key appears in OpenCode's config only after the user presses **Configure OpenCode**.
-- [ ] `chrome.storage.session` may contain the Val token while Helium is
-      running.
+- [ ] `chrome.storage.session` may contain the Val token and aggregate usage
+      statistics while Helium is running, but no message bodies or model IDs.
 - [ ] Companion logs and HTTP traffic never contain the RMIT bearer token.
 
 ## Release artifact

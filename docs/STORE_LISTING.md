@@ -8,11 +8,11 @@ Val OpenAI Local Bridge
 
 ## Short description
 
-Connects your signed-in RMIT Val session to an authenticated OpenAI-compatible API on IPv4 loopback.
+Connects your signed-in RMIT Val session to an authenticated OpenAI-compatible API.
 
 ## Single purpose
 
-Expose the user's signed-in RMIT Val chat session to locally running OpenAI-compatible clients through an authenticated loopback companion.
+Expose the user's signed-in RMIT Val chat session to authorized OpenAI-compatible clients through an authenticated user-operated companion.
 
 ## Detailed description
 
@@ -22,7 +22,8 @@ The extension:
 
 - connects only to RMIT Val and an IPv4 loopback companion;
 - keeps the RMIT bearer token inside the browser extension;
-- supports streaming, tool calls, structured output, image URLs, visible Val reasoning summaries, cancellation, and optional stored continuations; and
+- supports streaming, tool calls, structured output, image URLs, visible Val reasoning summaries, cancellation, and optional stored continuations;
+- shows session token totals and an estimated OpenAI API-equivalent cost without persisting message content or model identifiers; and
 - includes no analytics, advertising, telemetry, or developer-operated service.
 
 The separately installed Node 24 companion is required. Use remains subject to RMIT acceptable-use, academic-integrity, privacy, and rate-limit policies. This project is not endorsed by RMIT.
@@ -35,7 +36,7 @@ Stores the RMIT token in memory-backed session storage and retains only the loca
 
 Displays the companion's client API key behind a masked reveal/copy control after the local bridge authenticates; the key is not persisted by the extension.
 
-Provides a user-triggered button that asks the local companion to merge the endpoint, API key, and current models into the user's OpenCode configuration with a backup.
+Provides a user-triggered button that asks the local companion to merge the endpoint, API key, and OpenAI GPT-5.6 models into the user's OpenCode configuration with a backup.
 
 ### `https://val.rmit.edu.au/*`
 
@@ -50,7 +51,7 @@ Pairs with and maintains an authenticated connection to the user-operated compan
 Disclose authentication information and website content because the extension handles the Val session token and relays user chat content. State that:
 
 - handling is required for the extension's single purpose;
-- data is sent only to RMIT Val and the user's local companion;
+- data is sent only to RMIT Val and the user's companion, whose authenticated API can be made available to trusted local-network clients;
 - data is not sold, used for advertising, or used for unrelated purposes; and
 - prompt and response bodies are not persistently stored by the companion.
 

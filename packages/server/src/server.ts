@@ -211,7 +211,12 @@ export class ValBridgeServer {
     void this.reloadUpdatedExtension();
 
     if (!this.quiet) {
-      console.log(`Val OpenAI Bridge listening at ${this.baseUrl}/v1`);
+      const port = this.address?.port ?? this.config.port;
+      console.log(`Val OpenAI Bridge listening on ${this.config.host}:${port}`);
+      console.log(`Local API: ${this.baseUrl}/v1`);
+      if (this.config.host === "0.0.0.0") {
+        console.log(`LAN API: http://<this-computer's-LAN-IP>:${port}/v1`);
+      }
       console.log(
         `Extension pairing code: ${this.pairingCode} (expires in five minutes)`,
       );
@@ -227,7 +232,9 @@ export class ValBridgeServer {
   get baseUrl() {
     const address = this.address;
     const port = address?.port ?? this.config.port;
-    return `http://${this.config.host}:${port}`;
+    const clientHost =
+      this.config.host === "0.0.0.0" ? "127.0.0.1" : this.config.host;
+    return `http://${clientHost}:${port}`;
   }
 
   async close() {

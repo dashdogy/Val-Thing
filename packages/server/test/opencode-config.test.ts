@@ -27,6 +27,9 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
         "customOption": "keep"
       },
       "models": {
+        "openai-gpt-5.6-luna": {
+          "customModelSetting": "keep"
+        },
         "custom-model": {
           "name": "Keep Me"
         }
@@ -51,7 +54,7 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
   });
 
   assert.equal(result.updated, true);
-  assert.equal(result.modelsConfigured, 2);
+  assert.equal(result.modelsConfigured, 1);
   assert.ok(result.backupPath);
   assert.equal(await readFile(result.backupPath, "utf8"), original);
 
@@ -70,15 +73,32 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
   assert.equal(options.baseURL, baseURL);
   assert.equal(options.apiKey, clientApiKey);
   const models = val?.models as Record<string, Record<string, unknown>>;
-  assert.equal(models["custom-model"]?.name, "Keep Me");
+  assert.deepEqual(Object.keys(models), ["openai-gpt-5.6-luna"]);
+  assert.equal(models["openai-gpt-5.6-luna"]?.customModelSetting, "keep");
   assert.equal(models["openai-gpt-5.6-luna"]?.reasoning, true);
+  assert.deepEqual(models["openai-gpt-5.6-luna"]?.limit, {
+    context: 1_050_000,
+    output: 128_000,
+  });
   assert.deepEqual(
     Object.keys(
       models["openai-gpt-5.6-luna"]?.variants as Record<string, unknown>,
     ),
-    ["low", "medium", "high", "xhigh", "max", "ultra"],
+    ["low", "medium", "high", "xhigh", "max"],
   );
-  assert.ok(!("reasoning" in (models["plain-model"] ?? {})));
+  assert.deepEqual(
+    (
+      models["openai-gpt-5.6-luna"]?.variants as Record<
+        string,
+        Record<string, unknown>
+      >
+    ).max,
+    {
+      reasoningEffort: "max",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+    },
+  );
 });
 
 test("does not rewrite or back up an already configured file", async (t) => {
@@ -124,6 +144,26 @@ test("refuses invalid JSONC without changing the file", async (t) => {
   assert.deepEqual(await readdir(root), ["opencode.jsonc"]);
 });
 
+test("refuses to export an OpenCode provider without a GPT-5.6 model", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "val-opencode-model-filter-"));
+  const configPath = join(root, "opencode.jsonc");
+  const original = '{ "theme": "system" }\n';
+  await writeFile(configPath, original, "utf8");
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    configureOpenCode({
+      baseURL,
+      clientApiKey,
+      configPath,
+      models: [{ id: "plain-model", name: "Plain Model" }],
+    }),
+    /OpenAI GPT-5\.6/,
+  );
+  assert.equal(await readFile(configPath, "utf8"), original);
+  assert.deepEqual(await readdir(root), ["opencode.jsonc"]);
+});
+
 test("uses reasoning levels exposed in nested Val model features", () => {
   assert.deepEqual(
     reasoningLevelsForModel({
@@ -139,5 +179,23 @@ test("uses reasoning levels exposed in nested Val model features", () => {
       },
     }),
     ["low", "high", "ultra"],
+  );
+});
+
+test("always adds max to the reasoning variants for GPT-5.6 models", () => {
+  assert.deepEqual(
+    reasoningLevelsForModel({
+      id: "openai-gpt-5.6-terra",
+      features: {
+        chat: {
+          settings: {
+            reasoning_effort: {
+              values: ["low", "high"],
+            },
+          },
+        },
+      },
+    }),
+    ["low", "high", "max"],
   );
 });

@@ -16,6 +16,8 @@ type PopupStatus = {
     inputTokens: number;
     outputTokens: number;
     totalTokens: number;
+    pricedRequests: number;
+    estimatedOpenAICostNanodollars: number;
     activeRequests: number;
   };
 };
@@ -54,6 +56,8 @@ const totalTokens = element<HTMLElement>("#total-tokens");
 const inputTokens = element<HTMLElement>("#input-tokens");
 const outputTokens = element<HTMLElement>("#output-tokens");
 const requestCount = element<HTMLElement>("#request-count");
+const estimatedCost = element<HTMLElement>("#estimated-cost");
+const costNote = element<HTMLElement>("#cost-note");
 const usageNote = element<HTMLElement>("#usage-note");
 
 let urlEdited = false;
@@ -78,17 +82,33 @@ function errorMessage(error: unknown) {
 }
 
 const numberFormatter = new Intl.NumberFormat("en-AU");
+const costFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  currencyDisplay: "code",
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 8,
+});
 
 function tokenText(value: number, available: boolean) {
   return available ? numberFormatter.format(value) : "—";
 }
 
+function costText(value: number, available: boolean) {
+  return available ? costFormatter.format(value / 1_000_000_000) : "—";
+}
+
 function renderUsage(stats: PopupStatus["stats"]) {
   const usageAvailable = stats.requests === 0 || stats.meteredRequests > 0;
+  const costAvailable = stats.requests === 0 || stats.pricedRequests > 0;
   totalTokens.textContent = tokenText(stats.totalTokens, usageAvailable);
   inputTokens.textContent = tokenText(stats.inputTokens, usageAvailable);
   outputTokens.textContent = tokenText(stats.outputTokens, usageAvailable);
   requestCount.textContent = numberFormatter.format(stats.requests);
+  estimatedCost.textContent = costText(
+    stats.estimatedOpenAICostNanodollars,
+    costAvailable,
+  );
 
   usageActivity.textContent =
     stats.activeRequests > 0
@@ -105,6 +125,12 @@ function renderUsage(stats: PopupStatus["stats"]) {
         : unfinished > 0
           ? `${numberFormatter.format(unfinished)} request${unfinished === 1 ? "" : "s"} did not complete`
           : "Exact usage reported by Val";
+  costNote.textContent =
+    stats.requests === 0 || stats.pricedRequests === stats.meteredRequests
+      ? "OpenAI-equivalent estimate · not a Val charge"
+      : stats.pricedRequests === 0
+        ? "No priced GPT-5.6 usage reported yet"
+        : `${numberFormatter.format(stats.pricedRequests)} of ${numberFormatter.format(stats.meteredRequests)} metered requests matched GPT-5.6 pricing`;
 }
 
 function renderApiKey(apiKey?: string) {

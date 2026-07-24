@@ -25,6 +25,9 @@ async function main() {
   console.log(`Extension folder: ${displayPath(result.extensionPath)}`);
   console.log("Load that folder once as an unpacked Chromium extension.");
   console.log(`Start command: node ${displayPath(result.startPath)}`);
+  console.log(
+    "The API listens on all IPv4 interfaces by default. Keep its API key private and use a trusted network.",
+  );
 }
 
 await main().catch((error: unknown) => {

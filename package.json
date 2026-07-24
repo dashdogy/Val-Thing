@@ -1,6 +1,6 @@
 {
   "name": "val-openai-local-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A local OpenAI-compatible API bridge for an authenticated RMIT Val browser session.",
   "private": true,
   "type": "module",

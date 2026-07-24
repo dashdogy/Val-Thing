@@ -11,7 +11,7 @@ export type BridgeSecrets = {
 };
 
 export type RuntimeConfig = {
-  host: "127.0.0.1";
+  host: "0.0.0.0" | "127.0.0.1";
   port: number;
   maxConcurrency: number;
   requestTimeoutMs: number;
@@ -49,11 +49,9 @@ export function loadRuntimeConfig(
   overrides: Partial<RuntimeConfig> = {},
 ): RuntimeConfig {
   const requestedHost =
-    process.env.VAL_BRIDGE_HOST ?? overrides.host ?? "127.0.0.1";
-  if (requestedHost !== "127.0.0.1") {
-    throw new Error(
-      "VAL_BRIDGE_HOST must be 127.0.0.1; non-loopback binding is not supported.",
-    );
+    process.env.VAL_BRIDGE_HOST ?? overrides.host ?? "0.0.0.0";
+  if (requestedHost !== "0.0.0.0" && requestedHost !== "127.0.0.1") {
+    throw new Error("VAL_BRIDGE_HOST must be 0.0.0.0 or 127.0.0.1.");
   }
 
   const configuredOrigins =
@@ -62,7 +60,7 @@ export function loadRuntimeConfig(
       .filter(Boolean) ?? [];
 
   return {
-    host: "127.0.0.1",
+    host: requestedHost,
     port: overrides.port ?? integerFromEnv("VAL_BRIDGE_PORT", 8787, 1, 65535),
     maxConcurrency:
       overrides.maxConcurrency ??

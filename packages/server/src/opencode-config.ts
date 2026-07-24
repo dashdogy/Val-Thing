@@ -31,6 +31,16 @@ const REASONING_LEVELS = [
   "ultra",
 ] as const;
 const REASONING_LEVEL_SET = new Set<string>(REASONING_LEVELS);
+const GPT_56_DEFAULT_REASONING_LEVELS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+const GPT_56_CONTEXT_TOKENS = 1_050_000;
+const GPT_56_OUTPUT_TOKENS = 128_000;
+const GPT_56_MODEL_PATTERN = /(?:^|[-_:/])gpt[-_]?5\.6(?:[-_:/]|$)/i;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -133,10 +143,17 @@ function collectReasoningLevels(
 
 export function reasoningLevelsForModel(model: ValModel) {
   const levels = collectReasoningLevels(model);
-  if (levels.size === 0 && /(?:^|[-_])gpt[-_]?5\.6(?:[-_]|$)/i.test(model.id)) {
-    for (const level of REASONING_LEVELS.slice(1)) levels.add(level);
+  if (isOpenAIGpt56Model(model)) {
+    if (levels.size === 0) {
+      for (const level of GPT_56_DEFAULT_REASONING_LEVELS) levels.add(level);
+    }
+    levels.add("max");
   }
   return REASONING_LEVELS.filter((level) => levels.has(level));
+}
+
+export function isOpenAIGpt56Model(model: ValModel) {
+  return GPT_56_MODEL_PATTERN.test(model.id);
 }
 
 function modelFamily(model: ValModel) {
@@ -144,17 +161,37 @@ function modelFamily(model: ValModel) {
   return match?.[1] ? `gpt-${match[1]}` : undefined;
 }
 
+function reasoningVariant(level: (typeof REASONING_LEVELS)[number]) {
+  if (level === "max") {
+    return {
+      reasoningEffort: "max",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+    };
+  }
+  return { reasoningEffort: level };
+}
+
 export function openCodeModel(model: ValModel) {
   const reasoningLevels = reasoningLevelsForModel(model);
   const family = modelFamily(model);
+  const isGpt56 = isOpenAIGpt56Model(model);
   return {
     name: displayName(model),
     ...(family ? { family } : {}),
+    ...(isGpt56
+      ? {
+          limit: {
+            context: GPT_56_CONTEXT_TOKENS,
+            output: GPT_56_OUTPUT_TOKENS,
+          },
+        }
+      : {}),
     ...(reasoningLevels.length > 0
       ? {
           reasoning: true,
           variants: Object.fromEntries(
-            reasoningLevels.map((level) => [level, { reasoningEffort: level }]),
+            reasoningLevels.map((level) => [level, reasoningVariant(level)]),
           ),
         }
       : {}),
@@ -220,8 +257,11 @@ export async function configureOpenCode(
   if (!options.clientApiKey.startsWith("val-local-")) {
     throw new Error("The companion client API key is invalid.");
   }
-  if (options.models.length === 0) {
-    throw new Error("Val did not report any models to configure.");
+  const modelsToConfigure = options.models.filter(isOpenAIGpt56Model);
+  if (modelsToConfigure.length === 0) {
+    throw new Error(
+      "Val did not report any OpenAI GPT-5.6 models to configure.",
+    );
   }
 
   const configPath = resolve(
@@ -238,7 +278,7 @@ export async function configureOpenCode(
   const existingOptions = recordOrEmpty(existingVal.options);
   const existingModels = recordOrEmpty(existingVal.models);
   const generatedModels = Object.fromEntries(
-    options.models.map((model) => [
+    modelsToConfigure.map((model) => [
       model.id,
       {
         ...recordOrEmpty(existingModels[model.id]),
@@ -258,10 +298,7 @@ export async function configureOpenCode(
       headerTimeout: 30_000,
       chunkTimeout: 300_000,
     },
-    models: {
-      ...existingModels,
-      ...generatedModels,
-    },
+    models: generatedModels,
   };
 
   const format = formattingOptions(source);
@@ -287,7 +324,7 @@ export async function configureOpenCode(
     return {
       providerId: PROVIDER_ID,
       configPath,
-      modelsConfigured: options.models.length,
+      modelsConfigured: modelsToConfigure.length,
       updated: false,
     };
   }
@@ -309,7 +346,7 @@ export async function configureOpenCode(
     providerId: PROVIDER_ID,
     configPath,
     ...(backupPath ? { backupPath } : {}),
-    modelsConfigured: options.models.length,
+    modelsConfigured: modelsToConfigure.length,
     updated: true,
   };
 }

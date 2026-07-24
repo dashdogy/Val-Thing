@@ -30,4 +30,7 @@ Packaged builds are published through the repository's Releases page.
 npx --yes https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz
 ```
 
+The companion listens on all IPv4 interfaces by default. Keep its API key
+private and use it only on a trusted network.
+
 Use only with services and accounts you are authorized to access, and follow the applicable policies and terms.

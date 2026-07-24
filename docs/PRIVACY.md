@@ -1,8 +1,8 @@
 # Privacy policy
 
-Effective: 23 July 2026
+Effective: 24 July 2026
 
-Val OpenAI Local Bridge has one purpose: connect a user's signed-in RMIT Val chat session to OpenAI-compatible applications running on the same computer.
+Val OpenAI Local Bridge has one purpose: connect a user's signed-in RMIT Val chat session to OpenAI-compatible applications running on the same computer or a trusted local network.
 
 ## Data handled
 
@@ -20,18 +20,19 @@ The extension does not include analytics, advertising, telemetry, or developer-o
 The extension communicates only with:
 
 - `https://val.rmit.edu.au`, as necessary to provide its single purpose; and
-- the Node companion at an IPv4 loopback address (`http://127.0.0.1`).
+- the Node companion through IPv4 loopback (`http://127.0.0.1`).
 
-The companion binds only to IPv4 loopback. Prompts and responses remain between the user's local applications, the local companion, the extension, and RMIT Val. RMIT's own terms and privacy practices apply to information processed by Val.
+The companion listens on all IPv4 interfaces (`0.0.0.0`) by default, so its HTTP API can be reached by devices that can connect to the host's port. `/v1/*` requests require the locally generated client API key, browser CORS remains restricted to explicitly configured origins, and the RMIT bearer token remains inside the extension. The API uses unencrypted HTTP; users should keep the API key private and restrict access with a trusted network, host firewall, or private VPN. Prompts and responses cross the local network when a remote client uses the API. RMIT's own terms and privacy practices apply to information processed by Val.
 
 ## Storage and retention
 
 - The Val session token is stored only in memory-backed `chrome.storage.session`. It is removed when the user signs out and is cleared when the extension is disabled, reloaded, updated, or the browser restarts.
+- Aggregate request counts, token counts, and OpenAI API-equivalent cost estimates are stored in `chrome.storage.session` for the current browser session. These statistics contain no prompt or response bodies and no model identifiers.
 - `chrome.storage.local` stores only the companion URL and locally generated bridge secret.
 - The companion sends the client API key only after the extension authenticates. The extension holds it in service-worker and popup memory for the masked reveal/copy control and does not persist it.
 - The companion stores its client API key, bridge secret, paired extension ID, and at most 1,000 response-to-Val-chat mappings under the user's local application-data directory.
 - The companion does not persist prompt or response bodies.
-- If the user presses **Configure OpenCode**, the companion writes its loopback endpoint, client API key, and current Val model metadata to the user's global OpenCode config. It creates a timestamped backup before changing an existing file.
+- If the user presses **Configure OpenCode**, the companion writes its local loopback endpoint, client API key, and OpenAI GPT-5.6 model metadata to the user's global OpenCode config. It creates a timestamped backup before changing an existing file.
 - A request with `store: true` may create a Val conversation in the user's RMIT Val account. The user controls that history through Val.
 
 ## Permissions

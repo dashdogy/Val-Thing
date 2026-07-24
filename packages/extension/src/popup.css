@@ -212,6 +212,36 @@ header p {
   font-weight: 700;
 }
 
+.usage-cost {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(52, 111, 94, 0.13);
+}
+
+.usage-cost span {
+  color: #617b73;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.usage-cost strong {
+  color: #1f5d4d;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-cost-note {
+  margin: 4px 0 0;
+  color: #778a84;
+  font-size: 8px;
+  line-height: 1.35;
+  text-align: right;
+}
+
 .usage-note {
   margin: 10px 0 0;
   color: #778a84;
@@ -454,6 +484,8 @@ footer {
   .usage-heading,
   .usage-total span,
   .usage-breakdown dt,
+  .usage-cost span,
+  .usage-cost-note,
   .usage-note {
     color: #93aaa3;
   }
@@ -462,11 +494,13 @@ footer {
     color: #d9f2e9;
   }
 
-  .usage-breakdown div {
+  .usage-breakdown div,
+  .usage-cost {
     border-top-color: rgba(154, 207, 190, 0.14);
   }
 
-  .usage-breakdown dd {
+  .usage-breakdown dd,
+  .usage-cost strong {
     color: #c5e2d9;
   }
 
