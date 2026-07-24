@@ -23,7 +23,7 @@ type PendingRequest = {
   resolve: (result: RelayDoneResult) => void;
   reject: (error: unknown) => void;
   callbacks: ExecuteCallbacks;
-  timeout: NodeJS.Timeout;
+  timeout?: NodeJS.Timeout;
   abortListener?: () => void;
   signal?: AbortSignal;
 };
@@ -74,6 +74,10 @@ export class BridgeHub {
       this.status.valSocket &&
       this.status.compatible,
     );
+  }
+
+  supportsNativeResponses() {
+    return this.status.nativeResponses === true;
   }
 
   attach(socket: WebSocket, originExtensionId: string) {
@@ -174,12 +178,30 @@ export class BridgeHub {
       case "bridge.pong":
       case "bridge.auth":
         break;
-      case "relay.accepted":
-        this.pending.get(message.id)?.callbacks.onAccepted?.(message.accepted);
+      case "relay.accepted": {
+        const pending = this.pending.get(message.id);
+        if (!pending) break;
+        try {
+          pending.callbacks.onAccepted?.(message.accepted);
+        } catch (error) {
+          this.sendActive({ type: "relay.cancel", id: message.id });
+          this.cleanupPending(message.id, pending);
+          pending.reject(error);
+        }
         break;
-      case "relay.event":
-        this.pending.get(message.id)?.callbacks.onEvent?.(message.event);
+      }
+      case "relay.event": {
+        const pending = this.pending.get(message.id);
+        if (!pending) break;
+        try {
+          pending.callbacks.onEvent?.(message.event);
+        } catch (error) {
+          this.sendActive({ type: "relay.cancel", id: message.id });
+          this.cleanupPending(message.id, pending);
+          pending.reject(error);
+        }
         break;
+      }
       case "relay.done": {
         const pending = this.pending.get(message.id);
         if (pending) {
@@ -205,6 +227,7 @@ export class BridgeHub {
     request: RelayRequest,
     callbacks: ExecuteCallbacks = {},
     signal?: AbortSignal,
+    timeoutMs?: number,
   ): Promise<RelayDoneResult> {
     if (
       !this.active?.authenticated ||
@@ -247,28 +270,32 @@ export class BridgeHub {
     }
 
     const id = randomUUID();
+    const effectiveTimeout = timeoutMs ?? this.requestTimeoutMs;
     return await new Promise<RelayDoneResult>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        const pending = this.pending.get(id);
-        if (!pending) return;
-        this.sendActive({ type: "relay.cancel", id });
-        this.cleanupPending(id, pending);
-        reject(
-          new OpenAIHttpError(
-            504,
-            "upstream_timeout",
-            "Val did not complete the request before the configured timeout.",
-            "api_connection_error",
-          ),
-        );
-      }, this.requestTimeoutMs);
-      timeout.unref();
+      let timeout: NodeJS.Timeout | undefined;
+      if (effectiveTimeout > 0) {
+        timeout = setTimeout(() => {
+          const pending = this.pending.get(id);
+          if (!pending) return;
+          this.sendActive({ type: "relay.cancel", id });
+          this.cleanupPending(id, pending);
+          reject(
+            new OpenAIHttpError(
+              504,
+              "upstream_timeout",
+              "Val did not complete the request before the configured timeout.",
+              "api_connection_error",
+            ),
+          );
+        }, effectiveTimeout);
+        timeout.unref();
+      }
 
       const pending: PendingRequest = {
         resolve,
         reject,
         callbacks,
-        timeout,
+        ...(timeout ? { timeout } : {}),
         ...(signal ? { signal } : {}),
       };
 

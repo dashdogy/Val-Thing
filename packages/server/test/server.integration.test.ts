@@ -6,6 +6,7 @@ import test from "node:test";
 import type {
   ExtensionToServerMessage,
   RelayCompletionRequest,
+  RelayResponsesRequest,
   ServerToExtensionMessage,
 } from "@val-bridge/protocol";
 import { PROTOCOL_VERSION } from "@val-bridge/protocol";
@@ -35,6 +36,7 @@ class FakeValExtension {
   bridgeSecret = "";
   clientApiKey = "";
   readonly relayRequests: RelayCompletionRequest[] = [];
+  readonly responsesRequests: RelayResponsesRequest[] = [];
   readonly cancelledRequestIds: string[] = [];
   readonly heldRequestIds: string[] = [];
   reloadRequests = 0;
@@ -45,6 +47,7 @@ class FakeValExtension {
     readonly origin = EXTENSION_ORIGIN,
     readonly extensionId = EXTENSION_ID,
     readonly modelId = "val-test",
+    readonly nativeResponses = true,
   ) {}
 
   async pair() {
@@ -127,6 +130,7 @@ class FakeValExtension {
           valSession: true,
           valSocket: true,
           compatible: true,
+          nativeResponses: this.nativeResponses,
         },
       });
       return;
@@ -162,8 +166,419 @@ class FakeValExtension {
       });
       return;
     }
-
-    const relay = message.request;
+    if (message.request.kind === "responses") {
+      const relay = message.request;
+      this.responsesRequests.push(relay);
+      const requestText = JSON.stringify(relay.body);
+      if (requestText.includes("STREAM_ERROR")) {
+        this.send({
+          type: "relay.accepted",
+          id: message.id,
+          accepted: {},
+        });
+        this.send({
+          type: "relay.error",
+          id: message.id,
+          error: {
+            code: "val_upstream_error",
+            message: "Val rejected the streamed request.",
+            status: 400,
+          },
+        });
+        return;
+      }
+      if (requestText.includes("NATIVE_INCOMPLETE")) {
+        this.send({
+          type: "relay.accepted",
+          id: message.id,
+          accepted: {},
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.created",
+            data: {
+              type: "response.created",
+              response: {
+                id: "resp_incomplete",
+                model: relay.model,
+                object: "response",
+                output: [],
+              },
+            },
+          },
+        });
+        this.send({ type: "relay.done", id: message.id, result: {} });
+        return;
+      }
+      if (requestText.includes("HOLD_NATIVE")) {
+        this.send({
+          type: "relay.accepted",
+          id: message.id,
+          accepted: {},
+        });
+        this.heldRequestIds.push(message.id);
+        return;
+      }
+      if (requestText.includes("INVALID_NATIVE_EVENT")) {
+        this.send({
+          type: "relay.accepted",
+          id: message.id,
+          accepted: {},
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.completed\ninjected",
+            data: {
+              type: "response.completed",
+              id: "resp_invalid_event",
+              status: "completed",
+              model: relay.model,
+              output: [],
+            },
+          },
+        });
+        return;
+      }
+      const nativeId = `resp_native_${++this.chatCounter}`;
+      if (requestText.includes("REASONING_SUMMARY")) {
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.created",
+            data: {
+              type: "response.created",
+              response: {
+                id: nativeId,
+                model: relay.model,
+                object: "response",
+                output: [],
+              },
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.in_progress",
+            data: {
+              type: "response.in_progress",
+              response: {
+                id: nativeId,
+                model: relay.model,
+                object: "response",
+                output: [],
+              },
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.output_item.added",
+            data: {
+              type: "response.output_item.added",
+              output_index: 0,
+              item: {
+                id: "rs_testreasoning",
+                type: "reasoning",
+                status: "in_progress",
+                summary: [],
+              },
+              sequence_number: 2,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.reasoning_summary_part.added",
+            data: {
+              type: "response.reasoning_summary_part.added",
+              item_id: "rs_testreasoning",
+              output_index: 0,
+              summary_index: 0,
+              part: { type: "summary_text", text: "" },
+              sequence_number: 3,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.reasoning_summary_text.delta",
+            data: {
+              type: "response.reasoning_summary_text.delta",
+              item_id: "rs_testreasoning",
+              output_index: 0,
+              summary_index: 0,
+              delta: "Inspect the constraints first.",
+              sequence_number: 3,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.reasoning_summary_text.done",
+            data: {
+              type: "response.reasoning_summary_text.done",
+              item_id: "rs_testreasoning",
+              output_index: 0,
+              summary_index: 0,
+              sequence_number: 4,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.reasoning_summary_part.done",
+            data: {
+              type: "response.reasoning_summary_part.done",
+              output_index: 0,
+              item: {
+                id: "rs_testreasoning",
+                type: "reasoning",
+                status: "completed",
+                summary: [
+                  {
+                    text: "Inspect the constraints first.",
+                    type: "summary_text",
+                  },
+                ],
+              },
+              sequence_number: 5,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.output_item.added",
+            data: {
+              type: "response.output_item.added",
+              output_index: 1,
+              item: {
+                id: "msg_test1",
+                type: "message",
+                status: "in_progress",
+                role: "assistant",
+                content: [],
+              },
+              sequence_number: 6,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.output_text.delta",
+            data: {
+              type: "response.output_text.delta",
+              item_id: "msg_test1",
+              output_index: 1,
+              content_index: 0,
+              delta: "reasoned-answer",
+              sequence_number: 7,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.completed",
+            data: {
+              type: "response.completed",
+              id: nativeId,
+              object: "response",
+              status: "completed",
+              model: relay.model,
+              output: [
+                {
+                  id: "rs_testreasoning",
+                  type: "reasoning",
+                  status: "completed",
+                  summary: [
+                    {
+                      text: "Inspect the constraints first.",
+                      type: "summary_text",
+                    },
+                  ],
+                },
+                {
+                  id: "msg_test1",
+                  type: "message",
+                  status: "completed",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: "reasoned-answer" }],
+                },
+              ],
+              usage: {
+                input_tokens: 20,
+                output_tokens: 30,
+                total_tokens: 50,
+                output_tokens_details: { reasoning_tokens: 6 },
+              },
+            },
+          },
+        });
+        this.send({ type: "relay.done", id: message.id, result: {} });
+        return;
+      }
+      this.send({
+        type: "relay.event",
+        id: message.id,
+        event: {
+          kind: "sse",
+          eventType: "response.created",
+          data: {
+            type: "response.created",
+            response: {
+              id: nativeId,
+              model: relay.model,
+              object: "response",
+              output: [],
+            },
+          },
+        },
+      });
+      this.send({
+        type: "relay.event",
+        id: message.id,
+        event: {
+          kind: "sse",
+          eventType: "response.in_progress",
+          data: {
+            type: "response.in_progress",
+            response: {
+              id: nativeId,
+              model: relay.model,
+              object: "response",
+              output: [],
+            },
+          },
+        },
+      });
+      this.send({
+        type: "relay.event",
+        id: message.id,
+        event: {
+          kind: "sse",
+          eventType: "response.output_item.added",
+          data: {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: {
+              id: "msg_testoutput",
+              type: "message",
+              status: "in_progress",
+              role: "assistant",
+              content: [],
+            },
+            sequence_number: 2,
+          },
+        },
+      });
+      const isStream =
+        requestText.includes("RESPONSES_STREAM") ||
+        (!requestText.includes("STORE_THIS") &&
+          !requestText.includes("CONTINUE"));
+      const responseContent = requestText.includes("CONTINUE")
+        ? "continued-ok"
+        : "bridge-ok";
+      if (isStream) {
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.output_text.delta",
+            data: {
+              type: "response.output_text.delta",
+              item_id: "msg_testoutput",
+              output_index: 0,
+              content_index: 0,
+              delta: responseContent.slice(0, 6),
+              sequence_number: 3,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.output_text.delta",
+            data: {
+              type: "response.output_text.delta",
+              item_id: "msg_testoutput",
+              output_index: 0,
+              content_index: 0,
+              delta: responseContent.slice(6),
+              sequence_number: 4,
+            },
+          },
+        });
+      }
+      this.send({
+        type: "relay.event",
+        id: message.id,
+        event: {
+          kind: "sse",
+          eventType: "response.completed",
+          data: {
+            type: "response.completed",
+            id: nativeId,
+            object: "response",
+            status: "completed",
+            model: relay.model,
+            output: [
+              {
+                id: "msg_testoutput",
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [{ type: "output_text", text: responseContent }],
+              },
+            ],
+            usage: {
+              input_tokens: 15,
+              output_tokens: 20,
+              total_tokens: 35,
+            },
+          },
+        },
+      });
+      this.send({ type: "relay.done", id: message.id, result: {} });
+      return;
+    }
+    const relay = message.request as RelayCompletionRequest;
     this.relayRequests.push(relay);
     const requestText = JSON.stringify(relay.messages);
     const stored = relay.persistence.mode === "stored";
@@ -694,18 +1109,18 @@ test("periodic update control discovers releases and waits for active requests",
   });
 
   const unauthenticated = await fetch(
-    `${server.baseUrl}/bridge/update/status?current_version=0.1.8`,
+    `${server.baseUrl}/bridge/update/status?current_version=0.1.9`,
   );
   assert.equal(unauthenticated.status, 401);
 
   const statusResponse = await extensionControlFetch(
     server,
     extension,
-    "/bridge/update/status?current_version=0.1.8",
+    "/bridge/update/status?current_version=0.1.9",
   );
   assert.equal(statusResponse.status, 200);
   const status = (await statusResponse.json()) as Record<string, unknown>;
-  assert.equal(status.current_version, "0.1.8");
+  assert.equal(status.current_version, "0.1.9");
   assert.equal(status.latest_version, "9.9.9");
   assert.equal(status.update_available, true);
   assert.equal(
@@ -733,7 +1148,7 @@ test("periodic update control discovers releases and waits for active requests",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ current_version: "0.1.8" }),
+      body: JSON.stringify({ current_version: "0.1.9" }),
     },
   );
   assert.equal(busy.status, 409);
@@ -753,7 +1168,7 @@ test("periodic update control discovers releases and waits for active requests",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ current_version: "0.1.8" }),
+      body: JSON.stringify({ current_version: "0.1.9" }),
     },
   );
   await waitFor(() => delayedCheckStarted, "delayed update check");
@@ -787,13 +1202,13 @@ test("periodic update control discovers releases and waits for active requests",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ current_version: "0.1.8" }),
+      body: JSON.stringify({ current_version: "0.1.9" }),
     },
   );
   assert.equal(prepared.status, 202);
   assert.deepEqual(await prepared.json(), {
     accepted: true,
-    current_version: "0.1.8",
+    current_version: "0.1.9",
     latest_version: "9.9.9",
   });
   const whileRestarting = await apiFetch(server, "/v1/models");
@@ -803,6 +1218,114 @@ test("periodic update control discovers releases and waits for active requests",
     "bridge_updating",
   );
   await waitFor(() => shutdownRequests === 1, "update shutdown handoff");
+});
+
+test("uses the legacy Responses adapter until the extension advertises native support", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-legacy-responses-test-"),
+  );
+  const server = await ValBridgeServer.create({
+    config: { port: 0, configDirectory, requestTimeoutMs: 2_000 },
+    quiet: true,
+  });
+  await server.listen();
+  const extension = new FakeValExtension(
+    server,
+    EXTENSION_ORIGIN,
+    EXTENSION_ID,
+    "val-test",
+    false,
+  );
+  await extension.pair();
+  await extension.connect();
+
+  t.after(async () => {
+    extension.close();
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  const client = new OpenAI({
+    apiKey: server.secrets.get().clientApiKey,
+    baseURL: `${server.baseUrl}/v1`,
+  });
+  const stored = await client.responses.create({
+    model: "val-test",
+    input: "LEGACY_STORE",
+    store: true,
+  });
+  const continued = await client.responses.create({
+    model: "val-test",
+    input: "CONTINUE",
+    previous_response_id: stored.id,
+  });
+
+  assert.equal(stored.output_text, "bridge-ok");
+  assert.equal(continued.output_text, "continued-ok");
+  assert.equal(extension.responsesRequests.length, 0);
+  assert.deepEqual(extension.relayRequests.at(-1)?.persistence, {
+    mode: "stored",
+    chatId: "val-chat-1",
+    appendToExisting: true,
+  });
+});
+
+test("native Responses can outlive the chat timeout and still cancel on disconnect", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-native-timeout-test-"),
+  );
+  const server = await ValBridgeServer.create({
+    config: {
+      port: 0,
+      configDirectory,
+      requestTimeoutMs: 40,
+      responseTimeoutMs: 0,
+    },
+    quiet: true,
+  });
+  await server.listen();
+  const extension = new FakeValExtension(server);
+  await extension.pair();
+  await extension.connect();
+
+  t.after(async () => {
+    extension.close();
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  const controller = new AbortController();
+  let settled = false;
+  const requestOutcome = apiFetch(server, "/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "val-test",
+      input: "HOLD_NATIVE",
+    }),
+    signal: controller.signal,
+  }).then(
+    (response) => ({ response }),
+    (error: unknown) => ({ error }),
+  );
+  void requestOutcome.then(() => {
+    settled = true;
+  });
+
+  await waitFor(
+    () => extension.heldRequestIds.length === 1,
+    "held native Responses request",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(settled, false);
+
+  controller.abort();
+  const result = await requestOutcome;
+  assert.ok("error" in result);
+  await waitFor(
+    () => extension.cancelledRequestIds.length === 1,
+    "native Responses cancellation",
+  );
 });
 
 test("companion contract works through the official OpenAI JavaScript SDK", async (t) => {
@@ -962,7 +1485,6 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   });
   assert.equal(storedResponse.status, "completed");
   assert.equal(storedResponse.output[0]?.type, "message");
-  assert.equal(storedResponse.metadata?.val_chat_id, "val-chat-1");
 
   const continuedResponse = await client.responses.create({
     model: "val-test",
@@ -970,12 +1492,14 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
     previous_response_id: storedResponse.id,
   });
   assert.equal(continuedResponse.status, "completed");
-  const continuationRelay = extension.relayRequests.at(-1);
-  assert.deepEqual(continuationRelay?.persistence, {
-    mode: "stored",
-    chatId: "val-chat-1",
-    appendToExisting: true,
-  });
+  const continuationRequest = extension.responsesRequests.find((request) =>
+    JSON.stringify(request.body).includes("CONTINUE"),
+  );
+  assert.equal(
+    continuationRequest?.body.previous_response_id,
+    storedResponse.id,
+  );
+  assert.equal(continuationRequest?.body.store, true);
 
   const responseStream = await client.responses.create({
     model: "val-test",
@@ -999,13 +1523,12 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
     input: "REASONING_SUMMARY",
     reasoning: { effort: "high", summary: "detailed" },
   });
-  assert.equal(
-    extension.relayRequests.at(-1)?.parameters?.reasoning_effort,
-    "high",
-  );
-  assert.equal(
-    extension.relayRequests.at(-1)?.parameters?.reasoning_summary,
-    "detailed",
+  assert.ok(
+    extension.responsesRequests.some((req) => {
+      const body = req.body as Record<string, unknown>;
+      const reasoning = body.reasoning as Record<string, unknown>;
+      return reasoning?.effort === "high" && reasoning?.summary === "detailed";
+    }),
   );
   const reasonedOutput = reasonedResponse.output as Array<{
     type: string;
@@ -1119,6 +1642,32 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   assert.equal(typeof streamedError?.sequence_number, "number");
   assert.equal(streamedError?.message, "Val rejected the streamed request.");
 
+  const incompleteResponse = await apiFetch(server, "/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "val-test",
+      input: "NATIVE_INCOMPLETE",
+      stream: true,
+    }),
+  });
+  assert.equal(incompleteResponse.status, 200);
+  const incompleteText = await incompleteResponse.text();
+  assert.match(incompleteText, /"code":"invalid_upstream_response"/);
+
+  const invalidEventResponse = await apiFetch(server, "/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "val-test",
+      input: "INVALID_NATIVE_EVENT",
+      stream: true,
+    }),
+  });
+  assert.equal(invalidEventResponse.status, 200);
+  const invalidEventText = await invalidEventResponse.text();
+  assert.match(invalidEventText, /"code":"invalid_bridge_event"/);
+
   const unsupported = await apiFetch(server, "/v1/embeddings", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1138,12 +1687,24 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
 
   const mappings = JSON.parse(
     await readFile(join(configDirectory, "response-mappings.json"), "utf8"),
-  ) as { mappings: Array<{ responseId: string; chatId: string }> };
+  ) as {
+    mappings: Array<{ responseId: string; nativeResponseId: string }>;
+  };
   assert.ok(
     mappings.mappings.some(
       (mapping) =>
         mapping.responseId === storedResponse.id &&
-        mapping.chatId === "val-chat-1",
+        typeof mapping.nativeResponseId === "string",
+    ),
+  );
+  assert.ok(
+    mappings.mappings.some(
+      (mapping) => mapping.responseId === continuedResponse.id,
+    ),
+  );
+  assert.ok(
+    !mappings.mappings.some(
+      (mapping) => mapping.responseId === reasonedResponse.id,
     ),
   );
   assert.ok(!JSON.stringify(mappings).includes("STORE_THIS"));
@@ -1159,6 +1720,7 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   }, "sanitized diagnostics");
   const diagnostics = await readFile(server.diagnostics.path, "utf8");
   assert.match(diagnostics, /"event":"generation"/);
+  assert.match(diagnostics, /"endpoint":"responses"/);
   assert.match(diagnostics, /"requested_reasoning_effort":"max"/);
   assert.ok(!diagnostics.includes("HIDDEN_REASONING_PRIVATE_PROMPT"));
   assert.ok(!diagnostics.includes("private-answer"));
@@ -1294,6 +1856,21 @@ test("pairing rejects a claimed extension ID that does not match Origin", async 
   assert.equal(response.status, 400);
   assert.equal(
     ((await response.json()) as { error: { code: string } }).error.code,
+    "invalid_pairing_request",
+  );
+
+  const missingOrigin = await fetch(`${server.baseUrl}/bridge/pair`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      code: server.pairingCode,
+      extensionId: EXTENSION_ID,
+      protocolVersion: PROTOCOL_VERSION,
+    }),
+  });
+  assert.equal(missingOrigin.status, 400);
+  assert.equal(
+    ((await missingOrigin.json()) as { error: { code: string } }).error.code,
     "invalid_pairing_request",
   );
 });

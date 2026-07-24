@@ -322,6 +322,7 @@ function reasoningVariant(
       ? { reasoningSummary: "auto" }
       : {}),
     ...(level === "max" ? { include: ["reasoning.encrypted_content"] } : {}),
+    reasoningContext: "all_turns",
   };
 }
 
@@ -344,6 +345,7 @@ export function openCodeModel(model: ValModel) {
         reasoningEffort: "max",
         reasoningSummary: "detailed",
         include: ["reasoning.encrypted_content"],
+        reasoningContext: "all_turns",
       };
     }
   }

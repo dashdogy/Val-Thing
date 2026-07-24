@@ -14,6 +14,7 @@ import { basename, join, resolve } from "node:path";
 const TOOL_FILE_CONTENT = "VAL_BRIDGE_TOOL_PROBE_OK";
 const FINAL_MARKER = "OPENCODE_TOOL_ACCEPTANCE_OK";
 const REASONING_MARKER = "The read tool result was received.";
+const ENCRYPTED_REASONING_MARKER = "opaque-tool-reasoning-state";
 
 async function executableExists(path) {
   try {
@@ -152,6 +153,13 @@ function toolResponseEvents(argumentsJson) {
   const id = "resp_tool_acceptance";
   const callId = "call_read_acceptance";
   const itemId = "fc_read_acceptance";
+  const reasoningItem = {
+    id: "rs_tool_acceptance",
+    type: "reasoning",
+    status: "completed",
+    encrypted_content: ENCRYPTED_REASONING_MARKER,
+    summary: [],
+  };
   const item = {
     id: itemId,
     type: "function_call",
@@ -160,7 +168,7 @@ function toolResponseEvents(argumentsJson) {
     call_id: callId,
     name: "read",
   };
-  const response = baseResponse(id, [item]);
+  const response = baseResponse(id, [reasoningItem, item]);
   return [
     {
       type: "response.created",
@@ -173,23 +181,33 @@ function toolResponseEvents(argumentsJson) {
     {
       type: "response.output_item.added",
       output_index: 0,
+      item: { ...reasoningItem, status: "in_progress" },
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 0,
+      item: reasoningItem,
+    },
+    {
+      type: "response.output_item.added",
+      output_index: 1,
       item: { ...item, status: "in_progress", arguments: "" },
     },
     {
       type: "response.function_call_arguments.delta",
       item_id: itemId,
-      output_index: 0,
+      output_index: 1,
       delta: argumentsJson,
     },
     {
       type: "response.function_call_arguments.done",
       item_id: itemId,
-      output_index: 0,
+      output_index: 1,
       arguments: argumentsJson,
     },
     {
       type: "response.output_item.done",
-      output_index: 0,
+      output_index: 1,
       item,
     },
     { type: "response.completed", response },
@@ -464,6 +482,7 @@ const config = {
               reasoningEffort: "max",
               reasoningSummary: "detailed",
               include: ["reasoning.encrypted_content"],
+              reasoningContext: "all_turns",
             },
           },
           modalities: {
@@ -519,18 +538,49 @@ try {
       `OpenCode exited with ${run.code ?? run.signal}.\n${run.stderr || run.stdout}`,
     );
   }
-  if (requests.length < 2) {
+  const relayRequests = requests.filter((request) => {
+    const tools = Array.isArray(request?.tools) ? request.tools : [];
+    return (
+      tools.some((tool) => tool?.name === "read") ||
+      JSON.stringify(request).includes("function_call_output")
+    );
+  });
+  if (relayRequests.length < 2) {
     throw new Error(
-      `Expected a tool round-trip, but OpenCode made ${requests.length} Responses request(s).`,
+      `Expected a tool round-trip, but OpenCode made ${relayRequests.length} relevant Responses request(s).`,
     );
   }
-  const continuation = JSON.stringify(requests.slice(1));
+  const requestSummary = relayRequests.map((request) => ({
+    reasoning: request?.reasoning,
+    tools: Array.isArray(request?.tools)
+      ? request.tools.map((tool) => tool?.name)
+      : [],
+    hasToolOutput: JSON.stringify(request).includes("function_call_output"),
+  }));
+  for (const [index, request] of relayRequests.entries()) {
+    if (request?.reasoning?.context !== "all_turns") {
+      throw new Error(
+        `OpenCode request ${index + 1} did not preserve reasoning.context=all_turns: ${JSON.stringify(requestSummary)}.`,
+      );
+    }
+    if (!request?.include?.includes("reasoning.encrypted_content")) {
+      throw new Error(
+        `OpenCode request ${index + 1} did not request encrypted reasoning content.`,
+      );
+    }
+  }
+  const continuation = JSON.stringify(relayRequests.slice(1));
   if (
     !continuation.includes("function_call_output") ||
     !continuation.includes(TOOL_FILE_CONTENT)
   ) {
     throw new Error(
       "OpenCode did not return the read tool output to the Responses API.",
+    );
+  }
+  if (!continuation.includes(ENCRYPTED_REASONING_MARKER)) {
+    throw new Error(
+      "OpenCode did not return encrypted reasoning state during the tool continuation.",
     );
   }
   if (!run.stdout.includes(FINAL_MARKER)) {
@@ -544,7 +594,7 @@ try {
   );
   console.log(`Binary: ${openCodeBinary}`);
   console.log(
-    "Verified: Responses API, read tool round-trip, reasoning summary.",
+    "Verified: Responses API, read tool round-trip, reasoning summary, encrypted reasoning continuation.",
   );
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });

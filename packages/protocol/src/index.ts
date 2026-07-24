@@ -74,7 +74,14 @@ export type RelayModelsRequest = {
   kind: "models";
 };
 
-export type RelayRequest = RelayModelsRequest | RelayCompletionRequest;
+export type RelayResponsesRequest = {
+  kind: "responses";
+  model: string;
+  body: JsonObject;
+};
+
+export type RelayRequest =
+  RelayModelsRequest | RelayCompletionRequest | RelayResponsesRequest;
 
 export type ValModel = {
   id: string;
@@ -91,6 +98,7 @@ export type ValRelayEvent =
   | { kind: "replace"; content: string }
   | { kind: "usage"; usage: JsonObject }
   | { kind: "status"; data: JsonObject }
+  | { kind: "sse"; eventType: string; data: JsonObject }
   | { kind: "error"; error: RelayError };
 
 export type RelayAccepted = {
@@ -119,6 +127,7 @@ export type ExtensionStatus = {
   valSession: boolean;
   valSocket: boolean;
   compatible: boolean;
+  nativeResponses?: boolean;
   lastError?: string;
 };
 
