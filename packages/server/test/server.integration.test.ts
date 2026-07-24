@@ -12,6 +12,7 @@ import { PROTOCOL_VERSION } from "@val-bridge/protocol";
 import OpenAI from "openai";
 import WebSocket from "ws";
 import { ValBridgeServer } from "../src/server.js";
+import { UpdateChecker } from "../src/update-checker.js";
 
 const EXTENSION_ID = "abcdefghijklmnopabcdefghijklmnop";
 const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
@@ -211,6 +212,10 @@ class FakeValExtension {
       this.emitReasoningSummary(message.id, chatId);
       return;
     }
+    if (requestText.includes("HIDDEN_REASONING")) {
+      this.emitHiddenReasoning(message.id, chatId);
+      return;
+    }
     if (requestText.includes("CALL_TOOL")) {
       this.emitToolCall(message.id, chatId);
       return;
@@ -314,6 +319,41 @@ class FakeValExtension {
           prompt_tokens: 8,
           completion_tokens: 9,
           total_tokens: 17,
+          completion_tokens_details: { reasoning_tokens: 6 },
+        },
+      },
+    });
+  }
+
+  private emitHiddenReasoning(requestId: string, chatId?: string) {
+    this.send({
+      type: "relay.event",
+      id: requestId,
+      event: { kind: "delta", content: "private-answer" },
+    });
+    this.send({
+      type: "relay.event",
+      id: requestId,
+      event: {
+        kind: "usage",
+        usage: {
+          prompt_tokens: 5,
+          completion_tokens: 8,
+          total_tokens: 13,
+          completion_tokens_details: { reasoning_tokens: 6 },
+        },
+      },
+    });
+    this.send({
+      type: "relay.done",
+      id: requestId,
+      result: {
+        ...(chatId ? { chatId } : {}),
+        content: "private-answer",
+        usage: {
+          prompt_tokens: 5,
+          completion_tokens: 8,
+          total_tokens: 13,
           completion_tokens_details: { reasoning_tokens: 6 },
         },
       },
@@ -434,6 +474,36 @@ function pairingFetch(
       extensionId,
       protocolVersion: PROTOCOL_VERSION,
     }),
+  });
+}
+
+function updateRelease(version: string) {
+  return {
+    draft: false,
+    prerelease: false,
+    tag_name: `v${version}`,
+    html_url: `https://github.com/dashdogy/Val-Thing/releases/tag/v${version}`,
+    assets: [
+      { name: "latest.json" },
+      { name: `val-openai-local-bridge-${version}.zip` },
+      { name: `val-openai-local-bridge-extension-${version}.zip` },
+    ],
+  };
+}
+
+function extensionControlFetch(
+  server: ValBridgeServer,
+  extension: FakeValExtension,
+  path: string,
+  init: RequestInit = {},
+) {
+  return fetch(`${server.baseUrl}${path}`, {
+    ...init,
+    headers: {
+      authorization: `Bearer ${extension.bridgeSecret}`,
+      origin: extension.origin,
+      ...(init.headers ?? {}),
+    },
   });
 }
 
@@ -579,6 +649,160 @@ test("authenticated extension control configures OpenCode without returning secr
   assert.deepEqual(Object.keys(openCodeConfig.provider.val.models), [
     "openai-gpt-5.6-sol",
   ]);
+});
+
+test("periodic update control discovers releases and waits for active requests", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-update-test-"),
+  );
+  let shutdownRequests = 0;
+  let updateFetches = 0;
+  let delayedCheckStarted = false;
+  let releaseDelayedCheck: (() => void) | undefined;
+  const server = await ValBridgeServer.create({
+    config: {
+      port: 0,
+      configDirectory,
+      requestTimeoutMs: 2_000,
+    },
+    quiet: true,
+    updateChecker: new UpdateChecker({
+      fetcher: async () => {
+        updateFetches += 1;
+        if (updateFetches === 2) {
+          delayedCheckStarted = true;
+          await new Promise<void>((resolve) => {
+            releaseDelayedCheck = resolve;
+          });
+        }
+        return Response.json(updateRelease("9.9.9"));
+      },
+    }),
+    onUpdateRequested: () => {
+      shutdownRequests += 1;
+    },
+  });
+  await server.listen();
+  const extension = new FakeValExtension(server);
+  await extension.pair();
+  await extension.connect();
+
+  t.after(async () => {
+    extension.close();
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  const unauthenticated = await fetch(
+    `${server.baseUrl}/bridge/update/status?current_version=0.1.8`,
+  );
+  assert.equal(unauthenticated.status, 401);
+
+  const statusResponse = await extensionControlFetch(
+    server,
+    extension,
+    "/bridge/update/status?current_version=0.1.8",
+  );
+  assert.equal(statusResponse.status, 200);
+  const status = (await statusResponse.json()) as Record<string, unknown>;
+  assert.equal(status.current_version, "0.1.8");
+  assert.equal(status.latest_version, "9.9.9");
+  assert.equal(status.update_available, true);
+  assert.equal(
+    status.release_url,
+    "https://github.com/dashdogy/Val-Thing/releases/tag/v9.9.9",
+  );
+
+  const pendingCompletion = apiFetch(server, "/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "val-test",
+      messages: [{ role: "user", content: "HOLD_CONCURRENCY_UPDATE" }],
+    }),
+  });
+  await waitFor(
+    () => extension.heldRequestIds.length === 1,
+    "active request before update",
+  );
+
+  const busy = await extensionControlFetch(
+    server,
+    extension,
+    "/bridge/update/prepare",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ current_version: "0.1.8" }),
+    },
+  );
+  assert.equal(busy.status, 409);
+  assert.equal(
+    ((await busy.json()) as { error: { code: string } }).error.code,
+    "update_busy",
+  );
+  assert.equal(shutdownRequests, 0);
+
+  extension.finishHeld(extension.heldRequestIds[0] ?? "");
+  assert.equal((await pendingCompletion).status, 200);
+
+  const racedPrepare = extensionControlFetch(
+    server,
+    extension,
+    "/bridge/update/prepare",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ current_version: "0.1.8" }),
+    },
+  );
+  await waitFor(() => delayedCheckStarted, "delayed update check");
+  const requestDuringCheck = apiFetch(server, "/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "val-test",
+      messages: [{ role: "user", content: "HOLD_CONCURRENCY_UPDATE_RACE" }],
+    }),
+  });
+  await waitFor(
+    () => extension.heldRequestIds.length === 1,
+    "request started during update check",
+  );
+  assert.ok(releaseDelayedCheck);
+  releaseDelayedCheck();
+  const racedBusy = await racedPrepare;
+  assert.equal(racedBusy.status, 409);
+  assert.equal(
+    ((await racedBusy.json()) as { error: { code: string } }).error.code,
+    "update_busy",
+  );
+  extension.finishHeld(extension.heldRequestIds[0] ?? "");
+  assert.equal((await requestDuringCheck).status, 200);
+
+  const prepared = await extensionControlFetch(
+    server,
+    extension,
+    "/bridge/update/prepare",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ current_version: "0.1.8" }),
+    },
+  );
+  assert.equal(prepared.status, 202);
+  assert.deepEqual(await prepared.json(), {
+    accepted: true,
+    current_version: "0.1.8",
+    latest_version: "9.9.9",
+  });
+  const whileRestarting = await apiFetch(server, "/v1/models");
+  assert.equal(whileRestarting.status, 503);
+  assert.equal(
+    ((await whileRestarting.json()) as { error: { code: string } }).error.code,
+    "bridge_updating",
+  );
+  await waitFor(() => shutdownRequests === 1, "update shutdown handoff");
 });
 
 test("companion contract works through the official OpenAI JavaScript SDK", async (t) => {
@@ -828,6 +1052,50 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
     reasoningEventTypes.includes("response.reasoning_summary_part.done"),
   );
 
+  const hiddenReasoningResponse = await apiFetch(
+    server,
+    "/v1/chat/completions",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "val-test",
+        messages: [
+          {
+            role: "user",
+            content: "HIDDEN_REASONING_PRIVATE_PROMPT",
+          },
+        ],
+        reasoning_effort: "max",
+        reasoning_summary: "detailed",
+      }),
+    },
+  );
+  assert.equal(hiddenReasoningResponse.status, 200);
+  assert.equal(
+    hiddenReasoningResponse.headers.get("x-val-reasoning-status"),
+    "hidden",
+  );
+  assert.equal(
+    hiddenReasoningResponse.headers.get("x-val-reasoning-tokens"),
+    "6",
+  );
+  const hiddenReasoningBody = (await hiddenReasoningResponse.json()) as {
+    val_reasoning?: Record<string, unknown>;
+  };
+  assert.deepEqual(hiddenReasoningBody.val_reasoning, {
+    status: "hidden",
+    reasoning_tokens: 6,
+    tokens_reported: true,
+    summary_available: false,
+    requested_effort: "max",
+    requested_summary: "detailed",
+  });
+  assert.equal(
+    extension.relayRequests.at(-1)?.parameters?.reasoning_summary,
+    "detailed",
+  );
+
   const streamedErrorResponse = await apiFetch(server, "/v1/responses", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -880,6 +1148,23 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   );
   assert.ok(!JSON.stringify(mappings).includes("STORE_THIS"));
   assert.ok(!JSON.stringify(mappings).includes("CONTINUE"));
+
+  await waitFor(async () => {
+    try {
+      const log = await readFile(server.diagnostics.path, "utf8");
+      return log.includes('"reasoning_status":"hidden"');
+    } catch {
+      return false;
+    }
+  }, "sanitized diagnostics");
+  const diagnostics = await readFile(server.diagnostics.path, "utf8");
+  assert.match(diagnostics, /"event":"generation"/);
+  assert.match(diagnostics, /"requested_reasoning_effort":"max"/);
+  assert.ok(!diagnostics.includes("HIDDEN_REASONING_PRIVATE_PROMPT"));
+  assert.ok(!diagnostics.includes("private-answer"));
+  assert.ok(!diagnostics.includes("Inspect the constraints first."));
+  assert.ok(!diagnostics.includes(apiKey));
+  assert.ok(!diagnostics.includes(extension.bridgeSecret));
 });
 
 test("limits concurrency, cancels interrupted streams, and reports disconnection", async (t) => {

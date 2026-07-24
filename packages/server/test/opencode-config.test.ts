@@ -6,6 +6,8 @@ import test from "node:test";
 import { parse } from "jsonc-parser";
 import {
   configureOpenCode,
+  openAIModelCapabilities,
+  reasoningCapabilitiesForModel,
   reasoningLevelsForModel,
 } from "../src/opencode-config.js";
 
@@ -84,7 +86,7 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
     Object.keys(
       models["openai-gpt-5.6-luna"]?.variants as Record<string, unknown>,
     ),
-    ["low", "medium", "high", "xhigh", "max"],
+    ["low", "medium", "high", "xhigh", "max", "max-detailed"],
   );
   assert.deepEqual(
     (
@@ -108,6 +110,19 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
     {
       reasoningEffort: "max",
       reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+    },
+  );
+  assert.deepEqual(
+    (
+      models["openai-gpt-5.6-luna"]?.variants as Record<
+        string,
+        Record<string, unknown>
+      >
+    )["max-detailed"],
+    {
+      reasoningEffort: "max",
+      reasoningSummary: "detailed",
       include: ["reasoning.encrypted_content"],
     },
   );
@@ -194,7 +209,7 @@ test("uses reasoning levels exposed in nested Val model features", () => {
   );
 });
 
-test("always adds max to the reasoning variants for GPT-5.6 models", () => {
+test("preserves explicit levels plus the GPT-5.6 max family variant", () => {
   assert.deepEqual(
     reasoningLevelsForModel({
       id: "openai-gpt-5.6-terra",
@@ -209,5 +224,79 @@ test("always adds max to the reasoning variants for GPT-5.6 models", () => {
       },
     }),
     ["low", "high", "max"],
+  );
+});
+
+test("uses GPT-5.6 family defaults only when Val exposes no capability metadata", () => {
+  assert.deepEqual(
+    reasoningCapabilitiesForModel({
+      id: "openai-gpt-5.6-terra",
+    }),
+    {
+      levels: ["low", "medium", "high", "xhigh", "max"],
+      summaryModes: ["auto", "detailed"],
+      effortSource: "gpt_5_6_family",
+      summarySource: "gpt_5_6_family",
+    },
+  );
+});
+
+test("honors explicit reasoning and summary capability restrictions", () => {
+  const disabled = {
+    id: "openai-gpt-5.6-sol",
+    features: {
+      chat: {
+        supports_reasoning: false,
+        supports_reasoning_summary: false,
+      },
+    },
+  };
+  assert.deepEqual(reasoningLevelsForModel(disabled), []);
+
+  const explicit = {
+    id: "openai-gpt-5.6-sol",
+    features: {
+      chat: {
+        settings: {
+          reasoning_effort: { values: ["high", "max"] },
+          reasoning_summary: { values: ["auto"] },
+        },
+      },
+    },
+  };
+  assert.deepEqual(reasoningCapabilitiesForModel(explicit), {
+    levels: ["high", "max"],
+    summaryModes: ["auto"],
+    effortSource: "val_metadata",
+    summarySource: "val_metadata",
+  });
+});
+
+test("advertises context and reasoning evidence without exposing raw model data", () => {
+  assert.deepEqual(
+    openAIModelCapabilities({
+      id: "openai-gpt-5.6-luna",
+      features: {
+        chat: {
+          settings: {
+            reasoning_effort: { values: ["low", "max"] },
+            reasoning_summary: { values: ["auto", "detailed"] },
+          },
+        },
+      },
+    }),
+    {
+      context_window: 1_050_000,
+      max_output_tokens: 128_000,
+      val_capabilities: {
+        reasoning: true,
+        reasoning_efforts: ["low", "max"],
+        reasoning_summaries: ["auto", "detailed"],
+        evidence: {
+          effort: "val_metadata",
+          summary: "val_metadata",
+        },
+      },
+    },
   );
 });

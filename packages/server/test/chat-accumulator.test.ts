@@ -622,6 +622,12 @@ test("maps Val thinking text to standard Responses reasoning summary events", ()
       usage?: {
         output_tokens_details?: { reasoning_tokens?: number };
       };
+      val_reasoning?: {
+        status?: string;
+        reasoning_tokens?: number;
+        summary_available?: boolean;
+        requested_summary?: string;
+      };
     };
   };
   assert.equal(completed.response?.output?.[0]?.type, "reasoning");
@@ -636,10 +642,56 @@ test("maps Val thinking text to standard Responses reasoning summary events", ()
     completed.response?.usage?.output_tokens_details?.reasoning_tokens,
     7,
   );
+  assert.deepEqual(completed.response?.val_reasoning, {
+    status: "summary",
+    reasoning_tokens: 7,
+    tokens_reported: true,
+    summary_available: true,
+    requested_effort: "high",
+    requested_summary: "detailed",
+  });
   assert.deepEqual(
     allEvents.map((event) => event.sequence_number),
     Array.from({ length: allEvents.length }, (_, index) => index),
   );
+});
+
+test("reports hidden reasoning tokens without fabricating a summary item", () => {
+  const request = parseResponse({
+    model: "val-model",
+    input: "Think privately.",
+    reasoning: { effort: "max", summary: "detailed" },
+  });
+  const accumulator = new ChatAccumulator("val-model");
+  accumulator.consume({ kind: "delta", content: "Final answer." });
+  accumulator.consume({
+    kind: "usage",
+    usage: {
+      prompt_tokens: 4,
+      completion_tokens: 9,
+      total_tokens: 13,
+      completion_tokens_details: { reasoning_tokens: 6 },
+    },
+  });
+  const response = new ResponsesAdapter(request, accumulator).responseObject(
+    "completed",
+  ) as {
+    output: Array<{ type?: string }>;
+    val_reasoning?: Record<string, unknown>;
+  };
+
+  assert.deepEqual(
+    response.output.map((item) => item.type),
+    ["message"],
+  );
+  assert.deepEqual(response.val_reasoning, {
+    status: "hidden",
+    reasoning_tokens: 6,
+    tokens_reported: true,
+    summary_available: false,
+    requested_effort: "max",
+    requested_summary: "detailed",
+  });
 });
 
 test("produces schema-valid Responses error events after streaming starts", () => {

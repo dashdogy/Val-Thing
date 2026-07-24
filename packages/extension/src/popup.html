@@ -46,6 +46,25 @@
         </div>
       </section>
 
+      <section
+        class="update-card"
+        id="update-panel"
+        aria-label="Bridge update"
+        hidden
+      >
+        <div class="update-heading">
+          <div>
+            <span>Update available</span>
+            <strong id="update-version"></strong>
+          </div>
+          <span class="update-badge">New</span>
+        </div>
+        <button id="apply-update" type="button">Update everything</button>
+        <p id="update-status" aria-live="polite">
+          Checks automatically every six hours.
+        </p>
+      </section>
+
       <section class="usage-card" aria-label="Session usage">
         <div class="usage-heading">
           <span>Session usage</span>
@@ -65,10 +84,21 @@
             <dd id="output-tokens">0</dd>
           </div>
           <div>
+            <dt>Reasoning</dt>
+            <dd id="reasoning-tokens">0</dd>
+          </div>
+          <div>
             <dt>Requests</dt>
             <dd id="request-count">0</dd>
           </div>
         </dl>
+        <div class="reasoning-availability">
+          <span>Last reasoning</span>
+          <strong id="reasoning-status">Not reported yet</strong>
+        </div>
+        <p class="reasoning-note" id="reasoning-note">
+          Genuine summaries appear only when Val returns their text.
+        </p>
         <div class="usage-cost">
           <span>OpenAI API equivalent</span>
           <strong id="estimated-cost">USD 0.0000</strong>

@@ -195,6 +195,7 @@ function selectParameters(body: Record<string, unknown>): JsonObject {
     "seed",
     "stop",
     "reasoning_effort",
+    "reasoning_summary",
     "verbosity",
     "service_tier",
     "parallel_tool_calls",

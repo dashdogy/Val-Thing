@@ -9,6 +9,14 @@ type PopupStatus = {
   valSocket: boolean;
   compatible: boolean;
   lastError?: string;
+  update: {
+    state: "unknown" | "current" | "available" | "error" | "installing";
+    currentVersion: string;
+    latestVersion?: string;
+    checkedAt?: number;
+    releaseUrl?: string;
+    message?: string;
+  };
   stats: {
     requests: number;
     completedRequests: number;
@@ -18,6 +26,13 @@ type PopupStatus = {
     inputTokens: number;
     outputTokens: number;
     totalTokens: number;
+    reasoningTokens: number;
+    reasoningMeteredRequests: number;
+    reasoningSummaryRequests: number;
+    hiddenReasoningRequests: number;
+    lastReasoningTokens?: number;
+    lastReasoningTokensReported?: boolean;
+    lastReasoningStatus?: "summary" | "hidden" | "unavailable";
     pricedRequests: number;
     estimatedOpenAICostNanodollars: number;
     activeRequests: number;
@@ -38,6 +53,10 @@ const socketDot = element<HTMLSpanElement>("#socket-dot");
 const socketStatus = element<HTMLSpanElement>("#socket-status");
 const launchCompanionButton = element<HTMLButtonElement>("#launch-companion");
 const launchCompanionStatus = element<HTMLElement>("#launch-companion-status");
+const updatePanel = element<HTMLElement>("#update-panel");
+const updateVersion = element<HTMLElement>("#update-version");
+const applyUpdateButton = element<HTMLButtonElement>("#apply-update");
+const updateStatus = element<HTMLElement>("#update-status");
 const pairingPanel = element<HTMLFormElement>("#pairing-panel");
 const endpointPanel = element<HTMLElement>("#endpoint-panel");
 const apiBase = element<HTMLElement>("#api-base");
@@ -59,6 +78,9 @@ const usageActivity = element<HTMLElement>("#usage-activity");
 const totalTokens = element<HTMLElement>("#total-tokens");
 const inputTokens = element<HTMLElement>("#input-tokens");
 const outputTokens = element<HTMLElement>("#output-tokens");
+const reasoningTokens = element<HTMLElement>("#reasoning-tokens");
+const reasoningStatus = element<HTMLElement>("#reasoning-status");
+const reasoningNote = element<HTMLElement>("#reasoning-note");
 const requestCount = element<HTMLElement>("#request-count");
 const estimatedCost = element<HTMLElement>("#estimated-cost");
 const costNote = element<HTMLElement>("#cost-note");
@@ -72,6 +94,7 @@ let copyResetTimer: ReturnType<typeof setTimeout> | undefined;
 let configurePending = false;
 let launchPending = false;
 let launchResetTimer: ReturnType<typeof setTimeout> | undefined;
+let updatePending = false;
 
 function dot(element: HTMLElement, state: boolean | null) {
   element.classList.toggle("good", state === true);
@@ -110,6 +133,10 @@ function renderUsage(stats: PopupStatus["stats"]) {
   totalTokens.textContent = tokenText(stats.totalTokens, usageAvailable);
   inputTokens.textContent = tokenText(stats.inputTokens, usageAvailable);
   outputTokens.textContent = tokenText(stats.outputTokens, usageAvailable);
+  reasoningTokens.textContent = tokenText(
+    stats.reasoningTokens,
+    stats.requests === 0 || stats.reasoningMeteredRequests > 0,
+  );
   requestCount.textContent = numberFormatter.format(stats.requests);
   estimatedCost.textContent = costText(
     stats.estimatedOpenAICostNanodollars,
@@ -121,6 +148,25 @@ function renderUsage(stats: PopupStatus["stats"]) {
       ? `${numberFormatter.format(stats.activeRequests)} active`
       : "Idle";
   usageActivity.classList.toggle("busy", stats.activeRequests > 0);
+
+  reasoningStatus.textContent =
+    stats.lastReasoningStatus === "summary"
+      ? "Summary received"
+      : stats.lastReasoningStatus === "hidden"
+        ? "Used, summary hidden"
+        : stats.lastReasoningStatus === "unavailable"
+          ? stats.lastReasoningTokensReported
+            ? "None used"
+            : "Not returned"
+          : "Not reported yet";
+  const disclosed = stats.reasoningSummaryRequests;
+  const hidden = stats.hiddenReasoningRequests;
+  reasoningNote.textContent =
+    stats.requests === 0
+      ? "Genuine summaries appear only when Val returns their text."
+      : disclosed > 0 || hidden > 0
+        ? `${numberFormatter.format(disclosed)} ${disclosed === 1 ? "summary" : "summaries"} received · ${numberFormatter.format(hidden)} hidden`
+        : "No reasoning summary text has been returned this session.";
 
   const unfinished = stats.failedRequests + stats.cancelledRequests;
   usageNote.textContent =
@@ -164,6 +210,32 @@ function renderApiKey(apiKey?: string) {
   copyApiKeyButton.disabled = !available;
   toggleApiKeyButton.textContent = apiKeyVisible ? "Hide" : "Show";
   toggleApiKeyButton.setAttribute("aria-pressed", String(apiKeyVisible));
+}
+
+function renderUpdate(update: PopupStatus["update"], bridgeConnected: boolean) {
+  const visible = update.state === "available" || update.state === "installing";
+  updatePanel.hidden = !visible;
+  if (!visible) return;
+
+  const latest = update.latestVersion
+    ? `v${update.latestVersion}`
+    : "new version";
+  updateVersion.textContent = `v${update.currentVersion} → ${latest}`;
+  if (update.state === "installing" || updatePending) {
+    applyUpdateButton.textContent = "Updating…";
+    applyUpdateButton.disabled = true;
+    updateStatus.textContent =
+      "The companion is restarting; the extension will reload automatically.";
+    return;
+  }
+
+  applyUpdateButton.textContent = "Update everything";
+  applyUpdateButton.disabled = !bridgeConnected;
+  updateStatus.textContent = update.message
+    ? `${update.message} Reconnect the companion and try again.`
+    : bridgeConnected
+      ? "Updates the companion and extension, then reloads both cleanly."
+      : "Launch the companion before applying this update.";
 }
 
 async function message<T>(payload: Record<string, unknown>): Promise<T> {
@@ -234,6 +306,7 @@ async function refresh() {
       !status.valSocket ||
       !status.compatible ||
       !status.clientApiKey;
+    renderUpdate(status.update, status.bridgeConnected);
     renderUsage(status.stats);
     showError(status.lastError ?? "");
   } catch (error) {
@@ -277,6 +350,25 @@ launchCompanionButton.addEventListener("click", async () => {
     launchCompanionStatus.textContent =
       "Launcher unavailable; rerun the latest installer";
     showError(`Could not open the companion launcher: ${errorMessage(error)}`);
+    await refresh();
+  }
+});
+
+applyUpdateButton.addEventListener("click", async () => {
+  updatePending = true;
+  applyUpdateButton.disabled = true;
+  applyUpdateButton.textContent = "Updating…";
+  updateStatus.textContent = "Preparing a clean restart…";
+  showError();
+  try {
+    const response = await message<{
+      ok: true;
+      result: { latestVersion: string };
+    }>({ type: "POPUP_APPLY_UPDATE" });
+    updateStatus.textContent = `Installing v${response.result.latestVersion}; the extension will reload automatically.`;
+  } catch (error) {
+    updatePending = false;
+    showError(errorMessage(error));
     await refresh();
   }
 });
