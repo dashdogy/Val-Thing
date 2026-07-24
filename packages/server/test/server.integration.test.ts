@@ -222,6 +222,57 @@ class FakeValExtension {
         this.heldRequestIds.push(message.id);
         return;
       }
+      if (requestText.includes("REFRESH_REASONING_TIMEOUT")) {
+        this.send({
+          type: "relay.accepted",
+          id: message.id,
+          accepted: {},
+        });
+        const nativeId = `resp_native_${++this.chatCounter}`;
+        for (const [index, delay] of [40, 90, 140].entries()) {
+          setTimeout(() => {
+            this.send({
+              type: "relay.event",
+              id: message.id,
+              event: {
+                kind: "sse",
+                eventType:
+                  index === 0
+                    ? "message"
+                    : "response.reasoning_summary_text.delta",
+                data: {
+                  type: "response.reasoning_summary_text.delta",
+                  item_id: "rs_timeout_refresh",
+                  output_index: 0,
+                  summary_index: 0,
+                  delta: `reasoning-${index + 1}`,
+                  sequence_number: index,
+                },
+              },
+            });
+          }, delay);
+        }
+        setTimeout(() => {
+          this.send({
+            type: "relay.event",
+            id: message.id,
+            event: {
+              kind: "sse",
+              eventType: "response.completed",
+              data: {
+                type: "response.completed",
+                id: nativeId,
+                object: "response",
+                status: "completed",
+                model: relay.model,
+                output: [],
+              },
+            },
+          });
+          this.send({ type: "relay.done", id: message.id, result: {} });
+        }, 180);
+        return;
+      }
       if (requestText.includes("INVALID_NATIVE_EVENT")) {
         this.send({
           type: "relay.accepted",
@@ -621,6 +672,44 @@ class FakeValExtension {
           status: 400,
         },
       });
+      return;
+    }
+    if (requestText.includes("REFRESH_CHAT_REASONING_TIMEOUT")) {
+      for (const [index, delay] of [40, 90, 140].entries()) {
+        setTimeout(() => {
+          this.send({
+            type: "relay.event",
+            id: message.id,
+            event: {
+              kind: "openai",
+              data: {
+                choices: [
+                  {
+                    index: 0,
+                    delta: { reasoning_content: `reasoning-${index + 1}` },
+                    finish_reason: null,
+                  },
+                ],
+              },
+            },
+          });
+        }, delay);
+      }
+      setTimeout(() => {
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: { kind: "delta", content: "chat-timeout-refreshed" },
+        });
+        this.send({
+          type: "relay.done",
+          id: message.id,
+          result: {
+            ...(chatId ? { chatId } : {}),
+            content: "chat-timeout-refreshed",
+          },
+        });
+      }, 180);
       return;
     }
     if (requestText.includes("REASONING_SUMMARY")) {
@@ -1325,6 +1414,81 @@ test("native Responses can outlive the chat timeout and still cancel on disconne
   await waitFor(
     () => extension.cancelledRequestIds.length === 1,
     "native Responses cancellation",
+  );
+});
+
+test("reasoning chunks refresh the configured relay timeout", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-reasoning-timeout-test-"),
+  );
+  const server = await ValBridgeServer.create({
+    config: {
+      port: 0,
+      configDirectory,
+      requestTimeoutMs: 500,
+      responseTimeoutMs: 80,
+    },
+    quiet: true,
+  });
+  await server.listen();
+  const extension = new FakeValExtension(server);
+  await extension.pair();
+  await extension.connect();
+
+  t.after(async () => {
+    extension.close();
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  const refreshed = await apiFetch(server, "/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "val-test",
+      input: "REFRESH_REASONING_TIMEOUT",
+    }),
+  });
+  assert.equal(refreshed.status, 200);
+  assert.equal(
+    ((await refreshed.json()) as Record<string, unknown>).status,
+    "completed",
+  );
+
+  const chatRefreshed = await apiFetch(server, "/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "val-test",
+      messages: [{ role: "user", content: "REFRESH_CHAT_REASONING_TIMEOUT" }],
+    }),
+  });
+  assert.equal(chatRefreshed.status, 200);
+  assert.equal(
+    (
+      (await chatRefreshed.json()) as {
+        choices: Array<{ message: { content: string } }>;
+      }
+    ).choices[0]?.message.content,
+    "chat-timeout-refreshed",
+  );
+
+  const silent = await apiFetch(server, "/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "val-test",
+      input: "HOLD_NATIVE",
+    }),
+  });
+  assert.equal(silent.status, 504);
+  assert.equal(
+    ((await silent.json()) as { error: { code: string } }).error.code,
+    "upstream_timeout",
+  );
+  await waitFor(
+    () => extension.cancelledRequestIds.length === 1,
+    "silent native Responses timeout cancellation",
   );
 });
 
