@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   createSessionUsageStats,
   estimateOpenAICostNanodollars,
+  newerUsageStats,
   recordUsageRequest,
   reasoningTokensFromUsage,
   responseUsageDetails,
@@ -194,4 +195,37 @@ test("rejects malformed persisted counters", () => {
     500,
   );
   assert.deepEqual(restored, createSessionUsageStats(500));
+});
+
+test("restores durable totals without letting a fresh session erase them", () => {
+  const persisted = {
+    ...createSessionUsageStats(100),
+    lastUpdatedAt: 200,
+    requests: 2,
+    completedRequests: 2,
+    meteredRequests: 2,
+    inputTokens: 10,
+    outputTokens: 5,
+    totalTokens: 15,
+  };
+  const freshSession = createSessionUsageStats(1_000);
+  assert.deepEqual(newerUsageStats(freshSession, persisted), persisted);
+
+  const newerLocal = {
+    ...persisted,
+    lastUpdatedAt: 300,
+    requests: 3,
+  };
+  assert.deepEqual(newerUsageStats(newerLocal, persisted), newerLocal);
+
+  const equallyRecentPersisted = {
+    ...newerLocal,
+    completedRequests: 3,
+    meteredRequests: 3,
+    totalTokens: 20,
+  };
+  assert.deepEqual(
+    newerUsageStats(newerLocal, equallyRecentPersisted),
+    equallyRecentPersisted,
+  );
 });

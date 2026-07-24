@@ -55,6 +55,7 @@ import {
 import { ResponsesAdapter } from "./responses-adapter.js";
 import { Semaphore } from "./semaphore.js";
 import { UpdateChecker } from "./update-checker.js";
+import { UsageStatsStore } from "./usage-stats-store.js";
 
 type BridgeServerOptions = {
   config?: Partial<RuntimeConfig>;
@@ -173,6 +174,7 @@ export class ValBridgeServer {
   readonly hub: BridgeHub;
   readonly diagnostics: DiagnosticsLog;
   readonly updateChecker: UpdateChecker;
+  readonly usageStats: UsageStatsStore;
 
   private readonly semaphore: Semaphore;
   private readonly httpServer;
@@ -190,6 +192,7 @@ export class ValBridgeServer {
     mappings: MappingStore,
     diagnostics: DiagnosticsLog,
     updateChecker: UpdateChecker,
+    usageStats: UsageStatsStore,
     private readonly quiet: boolean,
     private readonly onUpdateRequested?: () => void,
   ) {
@@ -198,9 +201,10 @@ export class ValBridgeServer {
     this.mappings = mappings;
     this.diagnostics = diagnostics;
     this.updateChecker = updateChecker;
+    this.usageStats = usageStats;
     this.pairingCode = createPairingCode();
     this.pairingExpiresAt = Date.now() + 5 * 60_000;
-    this.hub = new BridgeHub(secrets, config.requestTimeoutMs);
+    this.hub = new BridgeHub(secrets, config.requestTimeoutMs, usageStats);
     this.semaphore = new Semaphore(config.maxConcurrency);
 
     this.httpServer = createServer((request, response) => {
@@ -234,12 +238,14 @@ export class ValBridgeServer {
     const mappings = await MappingStore.open(config.configDirectory);
     const diagnostics = new DiagnosticsLog(config.configDirectory);
     const updateChecker = options.updateChecker ?? new UpdateChecker();
+    const usageStats = await UsageStatsStore.open(config.configDirectory);
     return new ValBridgeServer(
       config,
       secrets,
       mappings,
       diagnostics,
       updateChecker,
+      usageStats,
       options.quiet ?? false,
       options.onUpdateRequested,
     );
@@ -272,6 +278,7 @@ export class ValBridgeServer {
         `Extension pairing code: ${this.pairingCode} (expires in five minutes)`,
       );
       console.log(`Configuration: ${this.secrets.path}`);
+      console.log(`Usage statistics: ${this.usageStats.path}`);
       console.log(`Sanitized diagnostics: ${this.diagnostics.path}`);
     }
     return this.address;
@@ -299,6 +306,7 @@ export class ValBridgeServer {
     await new Promise<void>((resolve, reject) => {
       this.httpServer.close((error) => (error ? reject(error) : resolve()));
     });
+    await this.usageStats.flush();
     await this.diagnostics.close();
   }
 

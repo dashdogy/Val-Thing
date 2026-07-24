@@ -131,11 +131,37 @@ export type ExtensionStatus = {
   lastError?: string;
 };
 
+export type UsageReasoningStatus = "summary" | "hidden" | "unavailable";
+
+export type UsageStatsSnapshot = {
+  startedAt: number;
+  lastUpdatedAt: number;
+  requests: number;
+  completedRequests: number;
+  failedRequests: number;
+  cancelledRequests: number;
+  meteredRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  reasoningTokens: number;
+  reasoningMeteredRequests: number;
+  reasoningSummaryRequests: number;
+  hiddenReasoningRequests: number;
+  pricedRequests: number;
+  estimatedOpenAICostNanodollars: number;
+  lastRequestTokens?: number;
+  lastReasoningTokens?: number;
+  lastReasoningTokensReported?: boolean;
+  lastReasoningStatus?: UsageReasoningStatus;
+};
+
 export type ServerToExtensionMessage =
   | {
       type: "bridge.authenticated";
       protocolVersion: number;
       clientApiKey: string;
+      usageStats?: UsageStatsSnapshot;
     }
   | {
       type: "relay.request";
@@ -164,6 +190,10 @@ export type ExtensionToServerMessage =
   | {
       type: "bridge.status";
       status: ExtensionStatus;
+    }
+  | {
+      type: "bridge.usage";
+      stats: UsageStatsSnapshot;
     }
   | {
       type: "bridge.pong";

@@ -18,6 +18,7 @@ import {
   reasoningTextFromStatus,
   splitValReasoningMarkup,
 } from "./reasoning.js";
+import type { UsageStatsStore } from "./usage-stats-store.js";
 
 type ExecuteCallbacks = {
   onAccepted?: (accepted: RelayAccepted) => void;
@@ -104,6 +105,7 @@ export class BridgeHub {
   constructor(
     private readonly secrets: SecretsStore,
     private readonly requestTimeoutMs: number,
+    private readonly usageStats: UsageStatsStore,
   ) {}
 
   getStatus() {
@@ -179,10 +181,12 @@ export class BridgeHub {
           valSocket: false,
           compatible: true,
         };
+        const usageStats = this.usageStats.snapshot();
         this.send(socket, {
           type: "bridge.authenticated",
           protocolVersion: PROTOCOL_VERSION,
           clientApiKey: configured.clientApiKey,
+          ...(usageStats ? { usageStats } : {}),
         });
         return;
       }
@@ -218,6 +222,11 @@ export class BridgeHub {
           ...message.status,
           extensionConnected: true,
         };
+        break;
+      case "bridge.usage":
+        if (!this.usageStats.update(message.stats)) {
+          this.active?.socket.close(4400, "Invalid usage statistics");
+        }
         break;
       case "bridge.pong":
       case "bridge.auth":

@@ -65,7 +65,7 @@ export function loadRuntimeConfig(
     port: overrides.port ?? integerFromEnv("VAL_BRIDGE_PORT", 8787, 1, 65535),
     maxConcurrency:
       overrides.maxConcurrency ??
-      integerFromEnv("VAL_BRIDGE_MAX_CONCURRENCY", 4, 1, 32),
+      integerFromEnv("VAL_BRIDGE_MAX_CONCURRENCY", 16, 1, 16),
     requestTimeoutMs:
       overrides.requestTimeoutMs ??
       integerFromEnv(
