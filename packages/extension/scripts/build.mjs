@@ -34,8 +34,10 @@ function validateManifest(manifest, packageJson) {
 
   const permissions = new Set(manifest.permissions ?? []);
   assert(
-    permissions.size === 1 && permissions.has("storage"),
-    "Release builds may request only the storage API permission.",
+    permissions.size === 2 &&
+      permissions.has("storage") &&
+      permissions.has("alarms"),
+    "Release builds may request only the storage and alarms API permissions.",
   );
 
   const hostPermissions = new Set(manifest.host_permissions ?? []);

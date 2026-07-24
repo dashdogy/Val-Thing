@@ -2,9 +2,9 @@
   "manifest_version": 3,
   "name": "Val OpenAI Local Bridge",
   "description": "Relays an authenticated RMIT Val session to a loopback OpenAI-compatible companion.",
-  "version": "0.1.6",
+  "version": "0.1.8",
   "minimum_chrome_version": "116",
-  "permissions": ["storage"],
+  "permissions": ["storage", "alarms"],
   "host_permissions": ["https://val.rmit.edu.au/*", "http://127.0.0.1/*"],
   "icons": {
     "16": "icons/icon-16.png",

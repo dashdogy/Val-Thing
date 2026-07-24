@@ -24,7 +24,19 @@ Run the project checks with:
 npm run check
 ```
 
+An installed OpenCode binary can be checked against the local API contract with:
+
+```shell
+npm run verify:opencode
+```
+
+The companion writes a bounded, sanitized `diagnostics.jsonl` file beside its
+local configuration. It records request outcomes and token counters, never
+prompts, responses, or credentials.
+
 Packaged builds are published through the repository's Releases page.
+Installed builds periodically check for a newer release and offer an in-app
+update when one is available.
 
 ```shell
 npx --yes --allow-remote=all https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz

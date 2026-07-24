@@ -1,4 +1,5 @@
 export type UsageOutcome = "completed" | "failed" | "cancelled";
+export type ReasoningAvailability = "summary" | "hidden" | "unavailable";
 
 export type SessionUsageStats = {
   startedAt: number;
@@ -11,9 +12,16 @@ export type SessionUsageStats = {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  reasoningTokens: number;
+  reasoningMeteredRequests: number;
+  reasoningSummaryRequests: number;
+  hiddenReasoningRequests: number;
   pricedRequests: number;
   estimatedOpenAICostNanodollars: number;
   lastRequestTokens?: number;
+  lastReasoningTokens?: number;
+  lastReasoningTokensReported?: boolean;
+  lastReasoningStatus?: ReasoningAvailability;
 };
 
 type UsageCounts = {
@@ -43,6 +51,12 @@ const TOKEN_DETAIL_KEYS = [
   "input_tokens_details",
   "promptTokensDetails",
   "inputTokensDetails",
+];
+const REASONING_TOKEN_DETAIL_KEYS = [
+  "completion_tokens_details",
+  "output_tokens_details",
+  "completionTokensDetails",
+  "outputTokensDetails",
 ];
 const LONG_CONTEXT_THRESHOLD = 272_000;
 const GPT_56_PRICING_NANODOLLARS_PER_TOKEN: Record<
@@ -76,6 +90,18 @@ function storedCount(value: unknown) {
     : 0;
 }
 
+function storedBoolean(value: unknown) {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function storedReasoningStatus(
+  value: unknown,
+): ReasoningAvailability | undefined {
+  return value === "summary" || value === "hidden" || value === "unavailable"
+    ? value
+    : undefined;
+}
+
 export function usageCounts(value: unknown): UsageCounts | null {
   const usage = record(value);
   if (!usage) return null;
@@ -99,6 +125,20 @@ export function usageCounts(value: unknown): UsageCounts | null {
       knownInput + knownOutput,
     ),
   };
+}
+
+export function reasoningTokensFromUsage(value: unknown): number | null {
+  const usage = record(value);
+  if (!usage) return null;
+  const direct = count(usage, ["reasoning_tokens", "reasoningTokens"]);
+  if (direct !== undefined) return direct;
+  for (const detailKey of REASONING_TOKEN_DETAIL_KEYS) {
+    const details = record(usage[detailKey]);
+    if (!details) continue;
+    const reasoning = count(details, ["reasoning_tokens", "reasoningTokens"]);
+    if (reasoning !== undefined) return reasoning;
+  }
+  return null;
 }
 
 function cachedInputTokens(usage: Record<string, unknown>) {
@@ -158,6 +198,10 @@ export function createSessionUsageStats(now = Date.now()): SessionUsageStats {
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
+    reasoningTokens: 0,
+    reasoningMeteredRequests: 0,
+    reasoningSummaryRequests: 0,
+    hiddenReasoningRequests: 0,
     pricedRequests: 0,
     estimatedOpenAICostNanodollars: 0,
   };
@@ -183,6 +227,10 @@ export function restoreSessionUsageStats(
     inputTokens: storedCount(record.inputTokens),
     outputTokens: storedCount(record.outputTokens),
     totalTokens: storedCount(record.totalTokens),
+    reasoningTokens: storedCount(record.reasoningTokens),
+    reasoningMeteredRequests: storedCount(record.reasoningMeteredRequests),
+    reasoningSummaryRequests: storedCount(record.reasoningSummaryRequests),
+    hiddenReasoningRequests: storedCount(record.hiddenReasoningRequests),
     pricedRequests: storedCount(record.pricedRequests),
     estimatedOpenAICostNanodollars: storedCount(
       record.estimatedOpenAICostNanodollars,
@@ -191,6 +239,18 @@ export function restoreSessionUsageStats(
   const lastRequestTokens = storedCount(record.lastRequestTokens);
   if (lastRequestTokens > 0) {
     restored.lastRequestTokens = lastRequestTokens;
+  }
+  const lastReasoningTokens = storedCount(record.lastReasoningTokens);
+  const lastReasoningTokensReported = storedBoolean(
+    record.lastReasoningTokensReported,
+  );
+  const lastReasoningStatus = storedReasoningStatus(record.lastReasoningStatus);
+  if (lastReasoningTokensReported !== undefined) {
+    restored.lastReasoningTokensReported = lastReasoningTokensReported;
+    restored.lastReasoningTokens = lastReasoningTokens;
+  }
+  if (lastReasoningStatus) {
+    restored.lastReasoningStatus = lastReasoningStatus;
   }
   return restored;
 }
@@ -212,8 +272,16 @@ export function settleUsageRequest(
   outcome: UsageOutcome,
   now = Date.now(),
   model?: string,
+  details: { reasoningSummaryAvailable?: boolean } = {},
 ): SessionUsageStats {
   const counts = usageCounts(usage);
+  const reasoningTokens = reasoningTokensFromUsage(usage);
+  const summaryAvailable = details.reasoningSummaryAvailable === true;
+  const completedReasoningStatus: ReasoningAvailability = summaryAvailable
+    ? "summary"
+    : (reasoningTokens ?? 0) > 0
+      ? "hidden"
+      : "unavailable";
   const estimatedCost =
     typeof model === "string"
       ? estimateOpenAICostNanodollars(model, usage)
@@ -230,9 +298,29 @@ export function settleUsageRequest(
     inputTokens: stats.inputTokens + (counts?.inputTokens ?? 0),
     outputTokens: stats.outputTokens + (counts?.outputTokens ?? 0),
     totalTokens: stats.totalTokens + (counts?.totalTokens ?? 0),
+    reasoningTokens: stats.reasoningTokens + (reasoningTokens ?? 0),
+    reasoningMeteredRequests:
+      stats.reasoningMeteredRequests + (reasoningTokens === null ? 0 : 1),
+    reasoningSummaryRequests:
+      stats.reasoningSummaryRequests +
+      (outcome === "completed" && summaryAvailable ? 1 : 0),
+    hiddenReasoningRequests:
+      stats.hiddenReasoningRequests +
+      (outcome === "completed" &&
+      !summaryAvailable &&
+      (reasoningTokens ?? 0) > 0
+        ? 1
+        : 0),
     pricedRequests: stats.pricedRequests + (estimatedCost === null ? 0 : 1),
     estimatedOpenAICostNanodollars:
       stats.estimatedOpenAICostNanodollars + (estimatedCost ?? 0),
     ...(counts ? { lastRequestTokens: counts.totalTokens } : {}),
+    ...(outcome === "completed"
+      ? {
+          lastReasoningStatus: completedReasoningStatus,
+          lastReasoningTokens: reasoningTokens ?? 0,
+          lastReasoningTokensReported: reasoningTokens !== null,
+        }
+      : {}),
   };
 }

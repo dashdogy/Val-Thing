@@ -5,6 +5,11 @@ import type {
   ChatAccumulator,
 } from "./chat-accumulator.js";
 import type { ResponseRequest } from "./openai-schema.js";
+import {
+  reasoningDisclosure,
+  reasoningSettingsFromResponse,
+  usageTokenCounts,
+} from "./reasoning-state.js";
 
 type ResponseEvent = Record<string, unknown> & {
   type: string;
@@ -286,35 +291,12 @@ export class ResponsesAdapter {
       });
     }
 
-    const usage = this.accumulator.usage as
-      | {
-          prompt_tokens?: number;
-          completion_tokens?: number;
-          total_tokens?: number;
-        }
-      | undefined;
-    const inputTokens = usage?.prompt_tokens ?? 0;
-    const outputTokens = usage?.completion_tokens ?? 0;
-    const completionDetails =
-      usage && "completion_tokens_details" in usage
-        ? usage.completion_tokens_details
-        : undefined;
-    const outputDetails =
-      usage && "output_tokens_details" in usage
-        ? usage.output_tokens_details
-        : undefined;
-    const reasoningTokens =
-      completionDetails &&
-      typeof completionDetails === "object" &&
-      typeof (completionDetails as { reasoning_tokens?: unknown })
-        .reasoning_tokens === "number"
-        ? (completionDetails as { reasoning_tokens: number }).reasoning_tokens
-        : outputDetails &&
-            typeof outputDetails === "object" &&
-            typeof (outputDetails as { reasoning_tokens?: unknown })
-              .reasoning_tokens === "number"
-          ? (outputDetails as { reasoning_tokens: number }).reasoning_tokens
-          : 0;
+    const usage = usageTokenCounts(this.accumulator.usage);
+    const disclosure = reasoningDisclosure(
+      this.accumulator.usage,
+      this.accumulator.reasoning,
+      reasoningSettingsFromResponse(this.request.reasoning),
+    );
 
     return {
       id: this.id,
@@ -341,13 +323,16 @@ export class ResponsesAdapter {
       top_p: this.request.top_p ?? null,
       truncation: this.request.truncation ?? "disabled",
       usage: {
-        input_tokens: inputTokens,
+        input_tokens: usage.inputTokens,
         input_tokens_details: { cached_tokens: 0 },
-        output_tokens: outputTokens,
-        output_tokens_details: { reasoning_tokens: reasoningTokens },
-        total_tokens: usage?.total_tokens ?? inputTokens + outputTokens,
+        output_tokens: usage.outputTokens,
+        output_tokens_details: {
+          reasoning_tokens: disclosure.reasoning_tokens,
+        },
+        total_tokens: usage.totalTokens,
       },
       metadata: this.request.metadata ?? {},
+      ...(status === "completed" ? { val_reasoning: disclosure } : {}),
     };
   }
 

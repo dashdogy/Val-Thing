@@ -4,6 +4,7 @@ import {
   createSessionUsageStats,
   estimateOpenAICostNanodollars,
   recordUsageRequest,
+  reasoningTokensFromUsage,
   restoreSessionUsageStats,
   settleUsageRequest,
   usageCounts,
@@ -59,12 +60,67 @@ test("tracks metered requests and outcomes without storing content", () => {
     inputTokens: 9,
     outputTokens: 4,
     totalTokens: 13,
+    reasoningTokens: 0,
+    reasoningMeteredRequests: 0,
+    reasoningSummaryRequests: 0,
+    hiddenReasoningRequests: 0,
     pricedRequests: 1,
     estimatedOpenAICostNanodollars: 165_000,
     lastRequestTokens: 13,
+    lastReasoningTokens: 0,
+    lastReasoningTokensReported: false,
+    lastReasoningStatus: "unavailable",
   });
   assert.ok(!("messages" in stats));
   assert.ok(!("model" in stats));
+});
+
+test("tracks genuine summaries separately from hidden reasoning tokens", () => {
+  assert.equal(
+    reasoningTokensFromUsage({
+      output_tokens_details: { reasoning_tokens: 11 },
+    }),
+    11,
+  );
+  assert.equal(reasoningTokensFromUsage({ completion_tokens: 5 }), null);
+
+  let stats = recordUsageRequest(createSessionUsageStats(100), 105);
+  stats = settleUsageRequest(
+    stats,
+    {
+      input_tokens: 4,
+      output_tokens: 12,
+      output_tokens_details: { reasoning_tokens: 11 },
+    },
+    "completed",
+    110,
+    "openai-gpt-5.6-sol",
+  );
+  assert.equal(stats.reasoningTokens, 11);
+  assert.equal(stats.reasoningMeteredRequests, 1);
+  assert.equal(stats.hiddenReasoningRequests, 1);
+  assert.equal(stats.reasoningSummaryRequests, 0);
+  assert.equal(stats.lastReasoningStatus, "hidden");
+
+  stats = recordUsageRequest(stats, 115);
+  stats = settleUsageRequest(
+    stats,
+    {
+      prompt_tokens: 2,
+      completion_tokens: 3,
+      completion_tokens_details: { reasoning_tokens: 2 },
+    },
+    "completed",
+    120,
+    "openai-gpt-5.6-sol",
+    { reasoningSummaryAvailable: true },
+  );
+  assert.equal(stats.reasoningTokens, 13);
+  assert.equal(stats.reasoningSummaryRequests, 1);
+  assert.equal(stats.hiddenReasoningRequests, 1);
+  assert.equal(stats.lastReasoningStatus, "summary");
+  assert.equal(stats.lastReasoningTokens, 2);
+  assert.equal(stats.lastReasoningTokensReported, true);
 });
 
 test("estimates current GPT-5.6 API-equivalent token costs", () => {

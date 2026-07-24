@@ -23,6 +23,7 @@ import {
   SecretsStore,
   type RuntimeConfig,
 } from "./config.js";
+import { DiagnosticsLog } from "./diagnostics.js";
 import {
   asOpenAIHttpError,
   OpenAIHttpError,
@@ -35,14 +36,29 @@ import {
   parseResponse,
   responseRequestToRelay,
   titleFromMessages,
+  type ChatCompletionRequest,
+  type ResponseRequest,
 } from "./openai-schema.js";
-import { configureOpenCode } from "./opencode-config.js";
+import {
+  configureOpenCode,
+  openAIModelCapabilities,
+} from "./opencode-config.js";
+import {
+  reasoningDisclosure,
+  reasoningSettingsFromParameters,
+  reasoningSettingsFromResponse,
+  type ReasoningDisclosure,
+  usageTokenCounts,
+} from "./reasoning-state.js";
 import { ResponsesAdapter } from "./responses-adapter.js";
 import { Semaphore } from "./semaphore.js";
+import { UpdateChecker } from "./update-checker.js";
 
 type BridgeServerOptions = {
   config?: Partial<RuntimeConfig>;
   quiet?: boolean;
+  updateChecker?: UpdateChecker;
+  onUpdateRequested?: () => void;
 };
 
 const MAX_PAIRING_FAILURES = 10;
@@ -127,6 +143,16 @@ function writeResponseSse(
   response.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
+function reasoningHeaders(
+  disclosure: ReasoningDisclosure,
+): Record<string, string> {
+  return {
+    "x-val-reasoning-status": disclosure.status,
+    "x-val-reasoning-tokens": String(disclosure.reasoning_tokens),
+    "x-val-reasoning-tokens-reported": String(disclosure.tokens_reported),
+  };
+}
+
 export class ValBridgeServer {
   readonly config: RuntimeConfig;
   readonly pairingCode: string;
@@ -134,6 +160,8 @@ export class ValBridgeServer {
   readonly secrets: SecretsStore;
   readonly mappings: MappingStore;
   readonly hub: BridgeHub;
+  readonly diagnostics: DiagnosticsLog;
+  readonly updateChecker: UpdateChecker;
 
   private readonly semaphore: Semaphore;
   private readonly httpServer;
@@ -142,16 +170,23 @@ export class ValBridgeServer {
   private reloadWatcher?: NodeJS.Timeout;
   private pairingCompleted = false;
   private pairingFailures = 0;
+  private activeApiRequests = 0;
+  private updateShutdownScheduled = false;
 
   private constructor(
     config: RuntimeConfig,
     secrets: SecretsStore,
     mappings: MappingStore,
+    diagnostics: DiagnosticsLog,
+    updateChecker: UpdateChecker,
     private readonly quiet: boolean,
+    private readonly onUpdateRequested?: () => void,
   ) {
     this.config = config;
     this.secrets = secrets;
     this.mappings = mappings;
+    this.diagnostics = diagnostics;
+    this.updateChecker = updateChecker;
     this.pairingCode = createPairingCode();
     this.pairingExpiresAt = Date.now() + 5 * 60_000;
     this.hub = new BridgeHub(secrets, config.requestTimeoutMs);
@@ -186,11 +221,16 @@ export class ValBridgeServer {
     const config = loadRuntimeConfig(options.config);
     const secrets = await SecretsStore.open(config.configDirectory);
     const mappings = await MappingStore.open(config.configDirectory);
+    const diagnostics = new DiagnosticsLog(config.configDirectory);
+    const updateChecker = options.updateChecker ?? new UpdateChecker();
     return new ValBridgeServer(
       config,
       secrets,
       mappings,
+      diagnostics,
+      updateChecker,
       options.quiet ?? false,
+      options.onUpdateRequested,
     );
   }
 
@@ -221,6 +261,7 @@ export class ValBridgeServer {
         `Extension pairing code: ${this.pairingCode} (expires in five minutes)`,
       );
       console.log(`Configuration: ${this.secrets.path}`);
+      console.log(`Sanitized diagnostics: ${this.diagnostics.path}`);
     }
     return this.address;
   }
@@ -247,6 +288,7 @@ export class ValBridgeServer {
     await new Promise<void>((resolve, reject) => {
       this.httpServer.close((error) => (error ? reject(error) : resolve()));
     });
+    await this.diagnostics.close();
   }
 
   private async reloadUpdatedExtension() {
@@ -294,7 +336,7 @@ export class ValBridgeServer {
             val_session: extension.valSession,
             val_socket: extension.valSocket,
             compatible: extension.compatible,
-            active_requests: this.semaphore.inUse,
+            active_requests: this.activeApiRequests,
           },
           corsHeaders,
         );
@@ -310,21 +352,45 @@ export class ValBridgeServer {
         await this.handleConfigureOpenCode(response, corsHeaders);
         return;
       }
+      if (method === "GET" && url.pathname === "/bridge/update/status") {
+        this.authenticateExtensionControl(request);
+        await this.handleUpdateStatus(url, response, corsHeaders);
+        return;
+      }
+      if (method === "POST" && url.pathname === "/bridge/update/prepare") {
+        this.authenticateExtensionControl(request);
+        await this.handlePrepareUpdate(request, response, corsHeaders);
+        return;
+      }
 
       if (url.pathname.startsWith("/v1/")) {
         this.authenticateClient(request);
+        if (this.updateShutdownScheduled) {
+          throw new OpenAIHttpError(
+            503,
+            "bridge_updating",
+            "The local Val bridge is restarting to apply an update.",
+            "api_connection_error",
+          );
+        }
       }
 
       if (method === "GET" && url.pathname === "/v1/models") {
-        await this.handleModels(response, corsHeaders);
+        await this.trackApiRequest(() =>
+          this.handleModels(response, corsHeaders),
+        );
         return;
       }
       if (method === "POST" && url.pathname === "/v1/chat/completions") {
-        await this.handleChatCompletion(request, response, corsHeaders);
+        await this.trackApiRequest(() =>
+          this.handleChatCompletion(request, response, corsHeaders),
+        );
         return;
       }
       if (method === "POST" && url.pathname === "/v1/responses") {
-        await this.handleResponse(request, response, corsHeaders);
+        await this.trackApiRequest(() =>
+          this.handleResponse(request, response, corsHeaders),
+        );
         return;
       }
       if (url.pathname.startsWith("/v1/")) {
@@ -507,6 +573,124 @@ export class ValBridgeServer {
     );
   }
 
+  private updateVersion(value: unknown) {
+    if (typeof value !== "string" || !/^\d+\.\d+\.\d+$/.test(value)) {
+      throw new OpenAIHttpError(
+        400,
+        "invalid_extension_version",
+        "The extension version is invalid.",
+        "invalid_request_error",
+        "current_version",
+      );
+    }
+    return value;
+  }
+
+  private async trackApiRequest<T>(action: () => Promise<T>) {
+    this.activeApiRequests += 1;
+    try {
+      return await action();
+    } finally {
+      this.activeApiRequests -= 1;
+    }
+  }
+
+  private assertUpdateIdle() {
+    if (this.activeApiRequests > 0 || this.semaphore.inUse > 0) {
+      throw new OpenAIHttpError(
+        409,
+        "update_busy",
+        "Wait for active API requests to finish before updating.",
+      );
+    }
+  }
+
+  private async handleUpdateStatus(
+    url: URL,
+    response: ServerResponse,
+    headers: Record<string, string>,
+  ) {
+    const currentVersion = this.updateVersion(
+      url.searchParams.get("current_version"),
+    );
+    const status = await this.updateChecker.check(currentVersion);
+    json(
+      response,
+      200,
+      {
+        current_version: status.currentVersion,
+        checked_at: status.checkedAt,
+        update_available: status.updateAvailable,
+        ...(status.latestVersion
+          ? { latest_version: status.latestVersion }
+          : {}),
+        ...(status.releaseUrl ? { release_url: status.releaseUrl } : {}),
+        ...(status.error ? { error: status.error } : {}),
+      },
+      headers,
+    );
+  }
+
+  private async handlePrepareUpdate(
+    request: IncomingMessage,
+    response: ServerResponse,
+    headers: Record<string, string>,
+  ) {
+    if (!this.onUpdateRequested) {
+      throw new OpenAIHttpError(
+        503,
+        "update_restart_unavailable",
+        "This companion was not launched by the installed updater.",
+      );
+    }
+    if (this.updateShutdownScheduled) {
+      throw new OpenAIHttpError(
+        409,
+        "update_already_started",
+        "The update restart has already started.",
+      );
+    }
+    this.assertUpdateIdle();
+    const body = (await readJsonBody(request, 16 * 1024)) as Record<
+      string,
+      unknown
+    >;
+    const currentVersion = this.updateVersion(body.current_version);
+    const status = await this.updateChecker.check(currentVersion, {
+      force: true,
+    });
+    if (status.error) {
+      throw new OpenAIHttpError(503, "update_check_failed", status.error);
+    }
+    if (!status.updateAvailable || !status.latestVersion) {
+      throw new OpenAIHttpError(
+        409,
+        "update_not_available",
+        "No newer bridge release is available.",
+      );
+    }
+    this.assertUpdateIdle();
+
+    this.updateShutdownScheduled = true;
+    json(
+      response,
+      202,
+      {
+        accepted: true,
+        current_version: currentVersion,
+        latest_version: status.latestVersion,
+      },
+      headers,
+    );
+    setTimeout(() => {
+      try {
+        this.onUpdateRequested?.();
+      } catch {
+        // The process-level shutdown handler owns restart failures.
+      }
+    }, 100).unref();
+  }
+
   private async handleModels(
     response: ServerResponse,
     headers: Record<string, string>,
@@ -523,6 +707,7 @@ export class ValBridgeServer {
           object: "model",
           created: model.created ?? 0,
           owned_by: model.owned_by ?? "rmit-val",
+          ...openAIModelCapabilities(model),
         })),
       },
       headers,
@@ -536,12 +721,17 @@ export class ValBridgeServer {
   ) {
     const release = this.semaphore.acquire();
     const controller = new AbortController();
+    const startedAt = Date.now();
+    let body: ChatCompletionRequest | undefined;
+    let accumulator: ChatAccumulator | undefined;
+    let outcome: "completed" | "failed" | "cancelled" = "failed";
+    let errorCode: string | undefined;
     response.on("close", () => {
       if (!response.writableEnded) controller.abort();
     });
 
     try {
-      const body = parseChatCompletion(
+      body = parseChatCompletion(
         await readJsonBody(request, this.config.bodyLimitBytes),
       );
       const metadata = body.metadata as Record<string, unknown> | undefined;
@@ -558,12 +748,14 @@ export class ValBridgeServer {
               title: titleFromMessages(body.messages as never),
             }
           : { mode: "temporary" as const };
-      const accumulator = new ChatAccumulator(body.model);
+      accumulator = new ChatAccumulator(body.model);
+      const activeBody = body;
+      const activeAccumulator = accumulator;
       let sseStarted = false;
       let acceptedChatId: string | undefined;
 
       const startSse = () => {
-        if (sseStarted || !body.stream) return;
+        if (sseStarted || !activeBody.stream) return;
         sseStarted = true;
         response.writeHead(200, {
           ...headers,
@@ -583,8 +775,8 @@ export class ValBridgeServer {
             startSse();
           },
           onEvent: (event) => {
-            const chunks = accumulator.consume(event);
-            if (body.stream && chunks.length > 0) {
+            const chunks = activeAccumulator.consume(event);
+            if (activeBody.stream && chunks.length > 0) {
               startSse();
               for (const chunk of chunks) writeChatSse(response, chunk);
             }
@@ -594,21 +786,67 @@ export class ValBridgeServer {
       );
 
       const chatId = result.chatId ?? acceptedChatId;
+      const disclosure = reasoningDisclosure(
+        accumulator.usage,
+        accumulator.reasoning,
+        reasoningSettingsFromParameters(
+          body as unknown as Record<string, unknown>,
+        ),
+      );
       if (body.stream) {
         startSse();
-        writeChatSse(
-          response,
-          accumulator.finishChunk(body.stream_options?.include_usage ?? false),
-        );
+        writeChatSse(response, {
+          ...accumulator.finishChunk(
+            body.stream_options?.include_usage ?? false,
+          ),
+          val_reasoning: disclosure,
+        });
         response.write("data: [DONE]\n\n");
         response.end();
       } else {
-        json(response, 200, accumulator.completion(), {
-          ...headers,
-          ...(chatId ? { "x-val-chat-id": chatId } : {}),
+        json(
+          response,
+          200,
+          {
+            ...accumulator.completion(),
+            val_reasoning: disclosure,
+          },
+          {
+            ...headers,
+            ...reasoningHeaders(disclosure),
+            ...(chatId ? { "x-val-chat-id": chatId } : {}),
+          },
+        );
+      }
+      outcome = "completed";
+    } catch (rawError) {
+      const normalized = asOpenAIHttpError(rawError);
+      outcome = controller.signal.aborted ? "cancelled" : "failed";
+      errorCode = normalized.code;
+      throw rawError;
+    } finally {
+      if (body && accumulator) {
+        const disclosure = reasoningDisclosure(
+          accumulator.usage,
+          accumulator.reasoning,
+          reasoningSettingsFromParameters(
+            body as unknown as Record<string, unknown>,
+          ),
+        );
+        this.diagnostics.recordGeneration({
+          endpoint: "chat.completions",
+          requestId: accumulator.id,
+          model: body.model,
+          stream: body.stream,
+          outcome,
+          durationMs: Date.now() - startedAt,
+          usage: usageTokenCounts(accumulator.usage),
+          reasoning: disclosure,
+          toolCalls: accumulator.toolCalls.length,
+          finishReason: accumulator.finishReason,
+          ...(errorCode ? { errorCode } : {}),
         });
       }
-    } finally {
       release();
     }
   }
@@ -620,12 +858,17 @@ export class ValBridgeServer {
   ) {
     const release = this.semaphore.acquire();
     const controller = new AbortController();
+    const startedAt = Date.now();
+    let body: ResponseRequest | undefined;
+    let accumulator: ChatAccumulator | undefined;
+    let outcome: "completed" | "failed" | "cancelled" = "failed";
+    let errorCode: string | undefined;
     response.on("close", () => {
       if (!response.writableEnded) controller.abort();
     });
 
     try {
-      const body = parseResponse(
+      body = parseResponse(
         await readJsonBody(request, this.config.bodyLimitBytes),
       );
       const prior = body.previous_response_id
@@ -656,14 +899,16 @@ export class ValBridgeServer {
             }
           : { mode: "temporary" as const };
 
-      const accumulator = new ChatAccumulator(body.model);
-      const adapter = new ResponsesAdapter(body, accumulator);
+      accumulator = new ChatAccumulator(body.model);
+      const activeBody = body;
+      const activeAccumulator = accumulator;
+      const adapter = new ResponsesAdapter(activeBody, activeAccumulator);
       let sseStarted = false;
       let initialEventsSent = false;
       let acceptedChatId: string | undefined;
 
       const startSse = () => {
-        if (sseStarted || !body.stream) return;
+        if (sseStarted || !activeBody.stream) return;
         sseStarted = true;
         response.writeHead(200, {
           ...headers,
@@ -676,7 +921,7 @@ export class ValBridgeServer {
       };
 
       const writeInitialEvents = () => {
-        if (!body.stream || initialEventsSent) return;
+        if (!activeBody.stream || initialEventsSent) return;
         initialEventsSent = true;
         startSse();
         for (const event of adapter.initialEvents())
@@ -686,21 +931,21 @@ export class ValBridgeServer {
       let result: RelayDoneResult;
       try {
         result = await this.hub.execute(
-          responseRequestToRelay(body, persistence),
+          responseRequestToRelay(activeBody, persistence),
           {
             onAccepted: (accepted) => {
               acceptedChatId = accepted.chatId;
               if (accepted.chatId) {
-                body.metadata = {
-                  ...(body.metadata ?? {}),
+                activeBody.metadata = {
+                  ...(activeBody.metadata ?? {}),
                   val_chat_id: accepted.chatId,
                 };
               }
               writeInitialEvents();
             },
             onEvent: (event) => {
-              const chunks = accumulator.consume(event);
-              if (!body.stream) return;
+              const chunks = activeAccumulator.consume(event);
+              if (!activeBody.stream) return;
               writeInitialEvents();
               for (const chunk of chunks) {
                 for (const responseEvent of adapter.eventsFromChunk(chunk)) {
@@ -713,6 +958,8 @@ export class ValBridgeServer {
         );
       } catch (rawError) {
         const error = asOpenAIHttpError(rawError);
+        outcome = controller.signal.aborted ? "cancelled" : "failed";
+        errorCode = error.code;
         if (body.stream && response.headersSent && !response.writableEnded) {
           for (const event of adapter.errorEvents(error)) {
             writeResponseSse(response, event);
@@ -742,12 +989,44 @@ export class ValBridgeServer {
         response.write("data: [DONE]\n\n");
         response.end();
       } else {
+        const disclosure = reasoningDisclosure(
+          accumulator.usage,
+          accumulator.reasoning,
+          reasoningSettingsFromResponse(body.reasoning),
+        );
         json(response, 200, adapter.responseObject("completed"), {
           ...headers,
+          ...reasoningHeaders(disclosure),
           ...(chatId ? { "x-val-chat-id": chatId } : {}),
         });
       }
+      outcome = "completed";
+    } catch (rawError) {
+      const normalized = asOpenAIHttpError(rawError);
+      outcome = controller.signal.aborted ? "cancelled" : "failed";
+      errorCode = normalized.code;
+      throw rawError;
     } finally {
+      if (body && accumulator) {
+        const disclosure = reasoningDisclosure(
+          accumulator.usage,
+          accumulator.reasoning,
+          reasoningSettingsFromResponse(body.reasoning),
+        );
+        this.diagnostics.recordGeneration({
+          endpoint: "responses",
+          requestId: accumulator.id,
+          model: body.model,
+          stream: body.stream,
+          outcome,
+          durationMs: Date.now() - startedAt,
+          usage: usageTokenCounts(accumulator.usage),
+          reasoning: disclosure,
+          toolCalls: accumulator.toolCalls.length,
+          finishReason: accumulator.finishReason,
+          ...(errorCode ? { errorCode } : {}),
+        });
+      }
       release();
     }
   }

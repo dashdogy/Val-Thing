@@ -138,6 +138,72 @@ header p {
   text-align: center;
 }
 
+.update-card {
+  margin-top: 14px;
+  padding: 14px 15px 13px;
+  border: 1px solid #b9d3ec;
+  border-radius: 14px;
+  background: linear-gradient(
+    135deg,
+    rgba(232, 243, 255, 0.97),
+    rgba(246, 251, 255, 0.94)
+  );
+  box-shadow: 0 8px 28px rgba(37, 99, 235, 0.08);
+}
+
+.update-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.update-heading div {
+  display: grid;
+  gap: 3px;
+}
+
+.update-heading span:first-child {
+  color: #47647e;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.update-heading strong {
+  color: #183e64;
+  font-size: 13px;
+}
+
+.update-badge {
+  border-radius: 999px;
+  background: #2563eb;
+  color: #fff;
+  padding: 3px 7px;
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.update-card button {
+  width: 100%;
+  min-height: 36px;
+  margin-top: 12px;
+  background: #2563eb;
+}
+
+.update-card button:hover {
+  background: #1d4ed8;
+}
+
+.update-card p {
+  margin: 6px 1px 0;
+  color: #61798f;
+  font-size: 9px;
+  line-height: 1.4;
+  text-align: center;
+}
+
 .usage-card {
   margin-top: 14px;
   padding: 14px 15px 13px;
@@ -209,7 +275,7 @@ header p {
 
 .usage-breakdown {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin: 13px 0 0;
 }
@@ -232,6 +298,37 @@ header p {
   color: #294c42;
   font-size: 12px;
   font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.reasoning-availability {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(52, 111, 94, 0.13);
+}
+
+.reasoning-availability span {
+  color: #617b73;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.reasoning-availability strong {
+  color: #294c42;
+  font-size: 10px;
+  text-align: right;
+}
+
+.reasoning-note {
+  margin: 4px 0 0;
+  color: #778a84;
+  font-size: 8px;
+  line-height: 1.35;
+  text-align: right;
 }
 
 .usage-cost {
@@ -500,6 +597,24 @@ footer {
 
   .companion-launch p {
     color: #93aaa3;
+  }
+
+  .update-card {
+    border-color: #304f70;
+    background: linear-gradient(
+      135deg,
+      rgba(25, 49, 76, 0.96),
+      rgba(22, 38, 56, 0.94)
+    );
+  }
+
+  .update-heading span:first-child,
+  .update-card p {
+    color: #9bb6cf;
+  }
+
+  .update-heading strong {
+    color: #d5e9fb;
   }
 
   .usage-card {

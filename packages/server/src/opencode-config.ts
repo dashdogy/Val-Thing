@@ -31,6 +31,8 @@ const REASONING_LEVELS = [
   "ultra",
 ] as const;
 const REASONING_LEVEL_SET = new Set<string>(REASONING_LEVELS);
+const REASONING_SUMMARY_MODES = ["auto", "concise", "detailed"] as const;
+const REASONING_SUMMARY_MODE_SET = new Set<string>(REASONING_SUMMARY_MODES);
 const GPT_56_DEFAULT_REASONING_LEVELS = [
   "low",
   "medium",
@@ -43,6 +45,18 @@ const GPT_56_OUTPUT_TOKENS = 128_000;
 const GPT_56_MODEL_PATTERN = /(?:^|[-_:/])gpt[-_]?5\.6(?:[-_:/]|$)/i;
 
 type JsonRecord = Record<string, unknown>;
+type CapabilitySource =
+  | "val_metadata"
+  | "gpt_5_6_family"
+  | "val_metadata_and_gpt_5_6_family"
+  | "none";
+
+export type ReasoningCapabilities = {
+  levels: Array<(typeof REASONING_LEVELS)[number]>;
+  summaryModes: Array<(typeof REASONING_SUMMARY_MODES)[number]>;
+  effortSource: CapabilitySource;
+  summarySource: CapabilitySource;
+};
 
 export type ConfigureOpenCodeOptions = {
   baseURL: string;
@@ -141,15 +155,152 @@ function collectReasoningLevels(
   return levels;
 }
 
-export function reasoningLevelsForModel(model: ValModel) {
-  const levels = collectReasoningLevels(model);
-  if (isOpenAIGpt56Model(model)) {
-    if (levels.size === 0) {
-      for (const level of GPT_56_DEFAULT_REASONING_LEVELS) levels.add(level);
+function collectReasoningSummaryModes(
+  value: unknown,
+  path: string[] = [],
+  modes = new Set<string>(),
+  depth = 0,
+) {
+  if (depth > 8 || value === null || value === undefined) return modes;
+  const joinedPath = path.join(".");
+  const relevantPath =
+    /(?:reason|think)/i.test(joinedPath) && /summary/i.test(joinedPath);
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase();
+    if (relevantPath && REASONING_SUMMARY_MODE_SET.has(normalized)) {
+      modes.add(normalized);
     }
-    levels.add("max");
+    return modes;
   }
-  return REASONING_LEVELS.filter((level) => levels.has(level));
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectReasoningSummaryModes(item, path, modes, depth + 1);
+    }
+    return modes;
+  }
+  if (!isRecord(value)) return modes;
+  for (const [key, nested] of Object.entries(value)) {
+    collectReasoningSummaryModes(nested, [...path, key], modes, depth + 1);
+  }
+  return modes;
+}
+
+function hasCapabilityPath(
+  value: unknown,
+  expression: RegExp,
+  path: string[] = [],
+  depth = 0,
+): boolean {
+  if (depth > 8 || value === null || value === undefined) return false;
+  if (expression.test(path.join("."))) return true;
+  if (Array.isArray(value)) {
+    return value.some((item) =>
+      hasCapabilityPath(item, expression, path, depth + 1),
+    );
+  }
+  if (!isRecord(value)) return false;
+  return Object.entries(value).some(([key, nested]) =>
+    hasCapabilityPath(nested, expression, [...path, key], depth + 1),
+  );
+}
+
+function explicitCapabilityFlag(
+  value: unknown,
+  kind: "reasoning" | "summary",
+  path: string[] = [],
+  depth = 0,
+): boolean | undefined {
+  if (depth > 8 || value === null || value === undefined) return undefined;
+  const joinedPath = path.join(".");
+  if (typeof value === "boolean") {
+    const reasoningPath = /(?:reason|think)/i.test(joinedPath);
+    const summaryPath = /summary/i.test(joinedPath);
+    const capabilityPath =
+      /(?:support|enable|available|capabilit|reasoning|thinking)/i.test(
+        joinedPath,
+      ) && !/disabled/i.test(joinedPath);
+    if (
+      reasoningPath &&
+      capabilityPath &&
+      (kind === "summary" ? summaryPath : !summaryPath)
+    ) {
+      return value;
+    }
+    return undefined;
+  }
+  const children = Array.isArray(value)
+    ? value.map((nested, index) => [String(index), nested] as const)
+    : isRecord(value)
+      ? Object.entries(value)
+      : [];
+  let enabled: boolean | undefined;
+  for (const [key, nested] of children) {
+    const result = explicitCapabilityFlag(
+      nested,
+      kind,
+      [...path, key],
+      depth + 1,
+    );
+    if (result === false) return false;
+    if (result === true) enabled = true;
+  }
+  return enabled;
+}
+
+export function reasoningCapabilitiesForModel(
+  model: ValModel,
+): ReasoningCapabilities {
+  const levels = collectReasoningLevels(model);
+  const summaryModes = collectReasoningSummaryModes(model);
+  const isGpt56 = isOpenAIGpt56Model(model);
+  const effortFlag = explicitCapabilityFlag(model, "reasoning");
+  const summaryFlag = explicitCapabilityFlag(model, "summary");
+  const hasEffortMetadata =
+    levels.size > 0 ||
+    hasCapabilityPath(model, /(?:reason|think).*(?:effort|level)/i);
+  const hasSummaryMetadata =
+    summaryModes.size > 0 ||
+    hasCapabilityPath(model, /(?:reason|think).*summary/i);
+
+  let effortSource: CapabilitySource = "none";
+  if (effortFlag !== false) {
+    if (hasEffortMetadata) {
+      effortSource = "val_metadata";
+      if (isGpt56 && !levels.has("max")) {
+        levels.add("max");
+        effortSource = "val_metadata_and_gpt_5_6_family";
+      }
+    } else if (isGpt56) {
+      for (const level of GPT_56_DEFAULT_REASONING_LEVELS) levels.add(level);
+      effortSource = "gpt_5_6_family";
+    }
+  }
+  if (effortFlag === false) levels.clear();
+
+  let summarySource: CapabilitySource = "none";
+  if (summaryFlag !== false) {
+    if (hasSummaryMetadata) {
+      summarySource = "val_metadata";
+    } else if (isGpt56 && levels.size > 0) {
+      summaryModes.add("auto");
+      summaryModes.add("detailed");
+      summarySource = "gpt_5_6_family";
+    }
+  }
+  if (summaryFlag === false) summaryModes.clear();
+
+  return {
+    levels: REASONING_LEVELS.filter((level) => levels.has(level)),
+    summaryModes: REASONING_SUMMARY_MODES.filter((mode) =>
+      summaryModes.has(mode),
+    ),
+    effortSource,
+    summarySource,
+  };
+}
+
+export function reasoningLevelsForModel(model: ValModel) {
+  return reasoningCapabilitiesForModel(model).levels;
 }
 
 export function isOpenAIGpt56Model(model: ValModel) {
@@ -161,18 +312,41 @@ function modelFamily(model: ValModel) {
   return match?.[1] ? `gpt-${match[1]}` : undefined;
 }
 
-function reasoningVariant(level: (typeof REASONING_LEVELS)[number]) {
+function reasoningVariant(
+  level: (typeof REASONING_LEVELS)[number],
+  summarySupported: boolean,
+) {
   return {
     reasoningEffort: level,
-    reasoningSummary: "auto",
+    ...(summarySupported || level === "max"
+      ? { reasoningSummary: "auto" }
+      : {}),
     ...(level === "max" ? { include: ["reasoning.encrypted_content"] } : {}),
   };
 }
 
 export function openCodeModel(model: ValModel) {
-  const reasoningLevels = reasoningLevelsForModel(model);
+  const reasoningCapabilities = reasoningCapabilitiesForModel(model);
+  const reasoningLevels = reasoningCapabilities.levels;
   const family = modelFamily(model);
   const isGpt56 = isOpenAIGpt56Model(model);
+  const summarySupported =
+    reasoningCapabilities.summaryModes.includes("auto") ||
+    reasoningCapabilities.summaryModes.includes("detailed");
+  const variants: Record<string, Record<string, unknown>> = {};
+  for (const level of reasoningLevels) {
+    variants[level] = reasoningVariant(level, summarySupported);
+    if (
+      level === "max" &&
+      reasoningCapabilities.summaryModes.includes("detailed")
+    ) {
+      variants["max-detailed"] = {
+        reasoningEffort: "max",
+        reasoningSummary: "detailed",
+        include: ["reasoning.encrypted_content"],
+      };
+    }
+  }
   return {
     name: displayName(model),
     ...(family ? { family } : {}),
@@ -187,9 +361,7 @@ export function openCodeModel(model: ValModel) {
     ...(reasoningLevels.length > 0
       ? {
           reasoning: true,
-          variants: Object.fromEntries(
-            reasoningLevels.map((level) => [level, reasoningVariant(level)]),
-          ),
+          variants,
         }
       : {}),
     temperature: true,
@@ -198,6 +370,28 @@ export function openCodeModel(model: ValModel) {
     modalities: {
       input: ["text", "image"],
       output: ["text"],
+    },
+  };
+}
+
+export function openAIModelCapabilities(model: ValModel) {
+  const reasoning = reasoningCapabilitiesForModel(model);
+  const isGpt56 = isOpenAIGpt56Model(model);
+  return {
+    ...(isGpt56
+      ? {
+          context_window: GPT_56_CONTEXT_TOKENS,
+          max_output_tokens: GPT_56_OUTPUT_TOKENS,
+        }
+      : {}),
+    val_capabilities: {
+      reasoning: reasoning.levels.length > 0,
+      reasoning_efforts: reasoning.levels,
+      reasoning_summaries: reasoning.summaryModes,
+      evidence: {
+        effort: reasoning.effortSource,
+        summary: reasoning.summarySource,
+      },
     },
   };
 }

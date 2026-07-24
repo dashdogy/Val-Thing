@@ -1,4 +1,5 @@
 import {
+  COMPANION_LAUNCH_URL,
   PROTOCOL_VERSION,
   type ExtensionStatus,
   type ExtensionToServerMessage,
@@ -36,6 +37,12 @@ import {
   type SessionUsageStats,
   type UsageOutcome,
 } from "./usage-stats.js";
+import {
+  createUpdateStatus,
+  parseCompanionUpdateStatus,
+  restoreUpdateStatus,
+  type ExtensionUpdateStatus,
+} from "./update-status.js";
 
 const VAL_ORIGIN = "https://val.rmit.edu.au";
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:8787";
@@ -43,6 +50,11 @@ const SESSION_TOKEN_KEY = "valSessionToken";
 const BRIDGE_SECRET_KEY = "bridgeSecret";
 const BRIDGE_URL_KEY = "bridgeUrl";
 const USAGE_STATS_KEY = "usageStats";
+const UPDATE_STATUS_KEY = "updateStatus";
+const UPDATE_ALARM_NAME = "val-bridge-update-check";
+const UPDATE_CHECK_INTERVAL_MINUTES = 6 * 60;
+const UPDATE_CHECK_MINIMUM_GAP_MS = 15 * 60_000;
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const TOKEN_MESSAGE = "VAL_SESSION_UPDATE";
 const GET_TOKEN_MESSAGE = "VAL_GET_SESSION_TOKEN";
 
@@ -51,6 +63,7 @@ type PopupStatus = ExtensionStatus & {
   bridgePaired: boolean;
   bridgeUrl: string;
   clientApiKey?: string;
+  update: ExtensionUpdateStatus;
   stats: SessionUsageStats & { activeRequests: number };
 };
 
@@ -95,6 +108,9 @@ const pendingByRequest = new Map<string, PendingCompletion>();
 const pendingByMessage = new Map<string, PendingCompletion>();
 let usageStats = createSessionUsageStats();
 let usageStatsWrite: Promise<void> = Promise.resolve();
+let extensionUpdateStatus = createUpdateStatus(EXTENSION_VERSION);
+let updateStatusWrite: Promise<void> = Promise.resolve();
+let updateCheckPromise: Promise<ExtensionUpdateStatus> | undefined;
 
 function pendingMessageKey(
   sessionId: string,
@@ -109,6 +125,19 @@ function persistUsageStats() {
   usageStatsWrite = usageStatsWrite
     .catch(() => undefined)
     .then(() => chrome.storage.session.set({ [USAGE_STATS_KEY]: snapshot }));
+}
+
+function persistUpdateStatus() {
+  const snapshot = { ...extensionUpdateStatus };
+  updateStatusWrite = updateStatusWrite
+    .catch(() => undefined)
+    .then(() => chrome.storage.local.set({ [UPDATE_STATUS_KEY]: snapshot }));
+}
+
+function setExtensionUpdateStatus(status: ExtensionUpdateStatus) {
+  extensionUpdateStatus = status;
+  persistUpdateStatus();
+  updateBadge();
 }
 
 function recordPendingRequest() {
@@ -128,6 +157,9 @@ function settlePendingRequest(
     outcome,
     Date.now(),
     pending.request.model,
+    {
+      reasoningSummaryAvailable: Boolean(pending.reasoningContent.trim()),
+    },
   );
   persistUsageStats();
 }
@@ -222,16 +254,23 @@ function updateStatus(patch: Partial<ExtensionStatus>) {
 }
 
 function updateBadge() {
+  const updateAvailable = extensionUpdateStatus.state === "available";
   const ready =
     bridgeAuthenticated &&
     extensionStatus.valSession &&
     extensionStatus.valSocket &&
     extensionStatus.compatible;
   void chrome.action.setBadgeText({
-    text: ready ? "ON" : bridgeAuthenticated ? "!" : "",
+    text: updateAvailable
+      ? "UP"
+      : ready
+        ? "ON"
+        : bridgeAuthenticated
+          ? "!"
+          : "",
   });
   void chrome.action.setBadgeBackgroundColor({
-    color: ready ? "#1f9d68" : "#d97706",
+    color: updateAvailable ? "#2563eb" : ready ? "#1f9d68" : "#d97706",
   });
 }
 
@@ -609,6 +648,7 @@ async function handleBridgeMessage(message: ServerToExtensionMessage) {
       bridgeReconnectDelay = 1_000;
       sendBridge({ type: "bridge.status", status: extensionStatus });
       updateBadge();
+      void checkForUpdates();
       break;
     case "bridge.ping":
       sendBridge({ type: "bridge.pong", timestamp: message.timestamp });
@@ -1604,6 +1644,168 @@ async function configureOpenCode() {
   };
 }
 
+function updateErrorMessage(body: Record<string, unknown>, fallback: string) {
+  const error =
+    body.error && typeof body.error === "object"
+      ? (body.error as Record<string, unknown>)
+      : {};
+  return typeof error.message === "string"
+    ? error.message
+    : typeof body.error === "string"
+      ? body.error
+      : fallback;
+}
+
+async function performUpdateCheck() {
+  const { secret, url } = await getBridgeSettings();
+  if (!secret) return extensionUpdateStatus;
+  const endpoint = new URL("/bridge/update/status", url);
+  endpoint.searchParams.set("current_version", EXTENSION_VERSION);
+  const response = await fetch(endpoint, {
+    headers: { Authorization: `Bearer ${secret}` },
+    cache: "no-store",
+    signal: AbortSignal.timeout(15_000),
+  });
+  const body = (await response.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  if (!response.ok) {
+    throw new Error(
+      updateErrorMessage(body, "The companion could not check for updates."),
+    );
+  }
+  const status = parseCompanionUpdateStatus(body, EXTENSION_VERSION);
+  setExtensionUpdateStatus(status);
+  return status;
+}
+
+async function checkForUpdates(force = false) {
+  if (
+    !force &&
+    extensionUpdateStatus.state !== "unknown" &&
+    extensionUpdateStatus.state !== "error" &&
+    extensionUpdateStatus.state !== "installing" &&
+    extensionUpdateStatus.checkedAt &&
+    Date.now() - extensionUpdateStatus.checkedAt < UPDATE_CHECK_MINIMUM_GAP_MS
+  ) {
+    return extensionUpdateStatus;
+  }
+  if (updateCheckPromise) return await updateCheckPromise;
+  updateCheckPromise = performUpdateCheck()
+    .catch((error) => {
+      const message =
+        error instanceof Error ? error.message : "Update check failed.";
+      const status: ExtensionUpdateStatus =
+        extensionUpdateStatus.state === "available"
+          ? { ...extensionUpdateStatus, message }
+          : {
+              state: "error",
+              currentVersion: EXTENSION_VERSION,
+              checkedAt: Date.now(),
+              message,
+            };
+      setExtensionUpdateStatus(status);
+      return status;
+    })
+    .finally(() => {
+      updateCheckPromise = undefined;
+    });
+  return await updateCheckPromise;
+}
+
+async function waitForCompanionToStop(url: string) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try {
+      await fetch(`${url}/healthz`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(750),
+      });
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error("The companion did not stop in time for the update.");
+}
+
+async function applyAvailableUpdate() {
+  const status = await checkForUpdates(true);
+  if (status.state === "error") {
+    throw new Error(status.message ?? "The update check failed.");
+  }
+  if (status.state !== "available" || !status.latestVersion) {
+    throw new Error("No newer bridge update is currently available.");
+  }
+  const { secret, url } = await getBridgeSettings();
+  if (!secret) {
+    throw new Error("Pair the extension with the companion before updating.");
+  }
+
+  let accepted = false;
+  try {
+    const response = await fetch(`${url}/bridge/update/prepare`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ current_version: EXTENSION_VERSION }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(20_000),
+    });
+    const body = (await response.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >;
+    if (
+      !response.ok ||
+      body.accepted !== true ||
+      body.latest_version !== status.latestVersion
+    ) {
+      throw new Error(
+        updateErrorMessage(body, "The companion could not start the update."),
+      );
+    }
+    accepted = true;
+    setExtensionUpdateStatus({
+      state: "installing",
+      currentVersion: EXTENSION_VERSION,
+      latestVersion: status.latestVersion,
+      checkedAt: Date.now(),
+    });
+    await waitForCompanionToStop(url);
+    await chrome.tabs.create({
+      url: COMPANION_LAUNCH_URL,
+      active: true,
+    });
+    return { latestVersion: status.latestVersion };
+  } catch (error) {
+    if (accepted) {
+      setExtensionUpdateStatus({
+        ...status,
+        state: "available",
+        message:
+          error instanceof Error
+            ? error.message
+            : "The installed updater could not be opened.",
+      });
+    }
+    throw error;
+  }
+}
+
+async function ensureUpdateAlarm() {
+  const alarm = await chrome.alarms.get(UPDATE_ALARM_NAME);
+  if (!alarm || alarm.periodInMinutes !== UPDATE_CHECK_INTERVAL_MINUTES) {
+    await chrome.alarms.create(UPDATE_ALARM_NAME, {
+      delayInMinutes: 1,
+      periodInMinutes: UPDATE_CHECK_INTERVAL_MINUTES,
+    });
+  }
+}
+
 async function popupStatus(): Promise<PopupStatus> {
   const settings = await getBridgeSettings();
   return {
@@ -1612,6 +1814,7 @@ async function popupStatus(): Promise<PopupStatus> {
     bridgePaired: Boolean(settings.secret),
     bridgeUrl: settings.url,
     ...(clientApiKey ? { clientApiKey } : {}),
+    update: extensionUpdateStatus,
     stats: {
       ...usageStats,
       activeRequests: [...pendingByRequest.values()].filter(
@@ -1683,6 +1886,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "POPUP_CONFIGURE_OPENCODE") {
       return { ok: true, result: await configureOpenCode() };
     }
+    if (message?.type === "POPUP_APPLY_UPDATE") {
+      return { ok: true, result: await applyAvailableUpdate() };
+    }
     if (message?.type === "POPUP_OPEN_VAL") {
       const tabs = await chrome.tabs.query({ url: `${VAL_ORIGIN}/*` });
       if (tabs[0]?.id) {
@@ -1714,7 +1920,13 @@ async function bootstrap() {
     SESSION_TOKEN_KEY,
     USAGE_STATS_KEY,
   ]);
+  const storedLocal = await chrome.storage.local.get(UPDATE_STATUS_KEY);
+  extensionUpdateStatus = restoreUpdateStatus(
+    storedLocal[UPDATE_STATUS_KEY],
+    EXTENSION_VERSION,
+  );
   usageStats = restoreSessionUsageStats(stored[USAGE_STATS_KEY]);
+  await ensureUpdateAlarm();
   if (
     typeof stored[SESSION_TOKEN_KEY] === "string" &&
     stored[SESSION_TOKEN_KEY]
@@ -1727,6 +1939,7 @@ async function bootstrap() {
     await refreshTokenFromValTab();
   }
   await connectBridge();
+  void checkForUpdates();
   updateBadge();
 }
 
@@ -1750,4 +1963,9 @@ function runBootstrap() {
 
 chrome.runtime.onStartup.addListener(runBootstrap);
 chrome.runtime.onInstalled.addListener(runBootstrap);
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === UPDATE_ALARM_NAME) {
+    void checkForUpdates(true);
+  }
+});
 runBootstrap();
