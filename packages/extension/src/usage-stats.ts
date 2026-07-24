@@ -84,6 +84,22 @@ function record(value: unknown) {
     : undefined;
 }
 
+export function responseUsageDetails(value: unknown) {
+  const event = record(value);
+  const response = record(event?.response) ?? event;
+  const usage = record(response?.usage);
+  const output = Array.isArray(response?.output) ? response.output : [];
+  const reasoningSummaryAvailable = output.some((rawItem) => {
+    const item = record(rawItem);
+    if (item?.type !== "reasoning" || !Array.isArray(item.summary)) return false;
+    return item.summary.some((rawPart) => {
+      const part = record(rawPart);
+      return typeof part?.text === "string" && part.text.trim().length > 0;
+    });
+  });
+  return { usage, reasoningSummaryAvailable };
+}
+
 function storedCount(value: unknown) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     ? value

@@ -98,6 +98,7 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
     {
       reasoningEffort: "high",
       reasoningSummary: "auto",
+      reasoningContext: "all_turns",
     },
   );
   assert.deepEqual(
@@ -111,6 +112,7 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
       reasoningEffort: "max",
       reasoningSummary: "auto",
       include: ["reasoning.encrypted_content"],
+      reasoningContext: "all_turns",
     },
   );
   assert.deepEqual(
@@ -124,6 +126,7 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
       reasoningEffort: "max",
       reasoningSummary: "detailed",
       include: ["reasoning.encrypted_content"],
+      reasoningContext: "all_turns",
     },
   );
 });

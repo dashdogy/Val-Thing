@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -12,7 +12,6 @@ import {
   PROTOCOL_VERSION,
   type PairRequest,
   type PairResponse,
-  type RelayDoneResult,
 } from "@val-bridge/protocol";
 import { WebSocketServer } from "ws";
 import { BridgeHub } from "./bridge-hub.js";
@@ -34,10 +33,8 @@ import {
   chatRequestToRelay,
   parseChatCompletion,
   parseResponse,
-  responseRequestToRelay,
   titleFromMessages,
   type ChatCompletionRequest,
-  type ResponseRequest,
 } from "./openai-schema.js";
 import {
   configureOpenCode,
@@ -50,7 +47,6 @@ import {
   type ReasoningDisclosure,
   usageTokenCounts,
 } from "./reasoning-state.js";
-import { ResponsesAdapter } from "./responses-adapter.js";
 import { Semaphore } from "./semaphore.js";
 import { UpdateChecker } from "./update-checker.js";
 
@@ -135,12 +131,13 @@ function writeChatSse(response: ServerResponse, value: unknown) {
   response.write(`data: ${JSON.stringify(value)}\n\n`);
 }
 
-function writeResponseSse(
+function writeSseEvent(
   response: ServerResponse,
-  event: Record<string, unknown>,
+  eventType: string,
+  data: unknown,
 ) {
-  response.write(`event: ${String(event.type)}\n`);
-  response.write(`data: ${JSON.stringify(event)}\n\n`);
+  response.write(`event: ${eventType}\n`);
+  response.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 function reasoningHeaders(
@@ -484,12 +481,15 @@ export class ValBridgeServer {
       request,
       64 * 1024,
     )) as Partial<PairRequest>;
+    const originExtensionId = this.extensionIdFromOrigin(
+      request.headers.origin ?? "",
+    );
     if (
       typeof body.code !== "string" ||
       typeof body.extensionId !== "string" ||
       body.protocolVersion !== PROTOCOL_VERSION ||
-      body.extensionId !==
-        this.extensionIdFromOrigin(request.headers.origin ?? "")
+      (originExtensionId != null &&
+        body.extensionId !== originExtensionId)
     ) {
       throw new OpenAIHttpError(
         400,
@@ -859,8 +859,10 @@ export class ValBridgeServer {
     const release = this.semaphore.acquire();
     const controller = new AbortController();
     const startedAt = Date.now();
-    let body: ResponseRequest | undefined;
-    let accumulator: ChatAccumulator | undefined;
+    let bridgeResponseId: string | undefined;
+    let completedPayload: Record<string, unknown> | undefined;
+    let mappedNativeId: string | undefined;
+    let body: ReturnType<typeof parseResponse> | undefined;
     let outcome: "completed" | "failed" | "cancelled" = "failed";
     let errorCode: string | undefined;
     response.on("close", () => {
@@ -884,31 +886,55 @@ export class ValBridgeServer {
         );
       }
 
-      const persistence = prior
-        ? {
-            mode: "stored" as const,
-            chatId: prior.chatId,
-            appendToExisting: true,
-          }
-        : body.store
-          ? {
-              mode: "stored" as const,
-              title: titleFromMessages(
-                responseRequestToRelay(body, { mode: "temporary" }).messages,
-              ),
-            }
-          : { mode: "temporary" as const };
+      bridgeResponseId = `resp_${randomUUID().replaceAll("-", "")}`;
+      const relayBody: Record<string, unknown> = {
+        model: body.model,
+        input: body.input,
+        stream: body.stream,
+        ...(typeof body.instructions === "string"
+          ? { instructions: body.instructions }
+          : {}),
+        ...(body.include !== undefined ? { include: body.include } : {}),
+        ...(body.tools !== undefined ? { tools: body.tools } : {}),
+        ...(body.tool_choice !== undefined
+          ? { tool_choice: body.tool_choice }
+          : {}),
+        ...(body.text !== undefined ? { text: body.text } : {}),
+        ...(body.temperature !== undefined
+          ? { temperature: body.temperature }
+          : {}),
+        ...(body.top_p !== undefined ? { top_p: body.top_p } : {}),
+        ...(body.max_output_tokens !== undefined
+          ? { max_output_tokens: body.max_output_tokens }
+          : {}),
+        ...(body.parallel_tool_calls !== undefined
+          ? { parallel_tool_calls: body.parallel_tool_calls }
+          : {}),
+        ...(body.reasoning !== undefined
+          ? { reasoning: body.reasoning }
+          : {}),
+        ...(body.truncation !== undefined
+          ? { truncation: body.truncation }
+          : {}),
+        ...(body.metadata !== undefined
+          ? { metadata: body.metadata }
+          : {}),
+        ...(body.store !== undefined ? { store: body.store } : {}),
+        ...(prior?.nativeResponseId
+          ? { previous_response_id: prior.nativeResponseId }
+          : {}),
+      };
 
-      accumulator = new ChatAccumulator(body.model);
-      const activeBody = body;
-      const activeAccumulator = accumulator;
-      const adapter = new ResponsesAdapter(activeBody, activeAccumulator);
+      const relayRequest = {
+        kind: "responses" as const,
+        model: body.model,
+        body: relayBody as import("@val-bridge/protocol").JsonObject,
+      };
+
       let sseStarted = false;
-      let initialEventsSent = false;
-      let acceptedChatId: string | undefined;
-
+      let nextSequenceNumber = 0;
       const startSse = () => {
-        if (sseStarted || !activeBody.stream) return;
+        if (sseStarted || !body!.stream) return;
         sseStarted = true;
         response.writeHead(200, {
           ...headers,
@@ -916,114 +942,120 @@ export class ValBridgeServer {
           "cache-control": "no-cache, no-store",
           "x-content-type-options": "nosniff",
           connection: "keep-alive",
-          ...(acceptedChatId ? { "x-val-chat-id": acceptedChatId } : {}),
         });
       };
 
-      const writeInitialEvents = () => {
-        if (!activeBody.stream || initialEventsSent) return;
-        initialEventsSent = true;
-        startSse();
-        for (const event of adapter.initialEvents())
-          writeResponseSse(response, event);
-      };
-
-      let result: RelayDoneResult;
       try {
-        result = await this.hub.execute(
-          responseRequestToRelay(activeBody, persistence),
+        await this.hub.execute(
+          relayRequest,
           {
-            onAccepted: (accepted) => {
-              acceptedChatId = accepted.chatId;
-              if (accepted.chatId) {
-                activeBody.metadata = {
-                  ...(activeBody.metadata ?? {}),
-                  val_chat_id: accepted.chatId,
-                };
-              }
-              writeInitialEvents();
-            },
+            onAccepted: () => startSse(),
             onEvent: (event) => {
-              const chunks = activeAccumulator.consume(event);
-              if (!activeBody.stream) return;
-              writeInitialEvents();
-              for (const chunk of chunks) {
-                for (const responseEvent of adapter.eventsFromChunk(chunk)) {
-                  writeResponseSse(response, responseEvent);
-                }
+              if (event.kind !== "sse") return;
+              const sequenceNumber = event.data.sequence_number;
+              if (typeof sequenceNumber === "number") {
+                nextSequenceNumber = Math.max(
+                  nextSequenceNumber,
+                  Math.floor(sequenceNumber) + 1,
+                );
+              }
+              if (event.eventType === "response.completed") {
+                const eventPayload = event.data as Record<string, unknown>;
+                completedPayload =
+                  eventPayload.response &&
+                  typeof eventPayload.response === "object" &&
+                  !Array.isArray(eventPayload.response)
+                    ? (eventPayload.response as Record<string, unknown>)
+                    : eventPayload;
+                mappedNativeId =
+                  typeof completedPayload.id === "string"
+                    ? completedPayload.id
+                    : undefined;
+              }
+              if (body!.stream) {
+                startSse();
+                writeSseEvent(response, event.eventType, event.data);
               }
             },
           },
           controller.signal,
+          this.config.responseTimeoutMs || undefined,
         );
+        outcome = "completed";
       } catch (rawError) {
-        const error = asOpenAIHttpError(rawError);
+        const err = asOpenAIHttpError(rawError);
         outcome = controller.signal.aborted ? "cancelled" : "failed";
-        errorCode = error.code;
+        errorCode = err.code;
         if (body.stream && response.headersSent && !response.writableEnded) {
-          for (const event of adapter.errorEvents(error)) {
-            writeResponseSse(response, event);
-          }
+          writeSseEvent(response, "error", {
+            type: "error",
+            sequence_number: nextSequenceNumber,
+            code: err.code,
+            message: err.message,
+            param: err.param ?? null,
+          });
           response.write("data: [DONE]\n\n");
           response.end();
           return;
         }
-        throw error;
+        throw rawError;
       }
 
-      const chatId = result.chatId ?? acceptedChatId;
-      if (chatId) {
-        body.metadata = {
-          ...(body.metadata ?? {}),
-          val_chat_id: chatId,
-        };
-      }
-      if ((body.store || prior) && chatId) {
-        await this.mappings.set(adapter.id, chatId);
+      if (mappedNativeId) {
+        const clientVisibleId =
+          typeof completedPayload?.id === "string"
+            ? completedPayload.id
+            : bridgeResponseId;
+        await this.mappings.set(clientVisibleId, mappedNativeId);
       }
 
       if (body.stream) {
-        writeInitialEvents();
-        for (const event of adapter.finalEvents())
-          writeResponseSse(response, event);
         response.write("data: [DONE]\n\n");
         response.end();
       } else {
-        const disclosure = reasoningDisclosure(
-          accumulator.usage,
-          accumulator.reasoning,
-          reasoningSettingsFromResponse(body.reasoning),
-        );
-        json(response, 200, adapter.responseObject("completed"), {
-          ...headers,
-          ...reasoningHeaders(disclosure),
-          ...(chatId ? { "x-val-chat-id": chatId } : {}),
-        });
+        json(response, 200, completedPayload ?? {}, headers);
       }
-      outcome = "completed";
-    } catch (rawError) {
-      const normalized = asOpenAIHttpError(rawError);
-      outcome = controller.signal.aborted ? "cancelled" : "failed";
-      errorCode = normalized.code;
-      throw rawError;
     } finally {
-      if (body && accumulator) {
-        const disclosure = reasoningDisclosure(
-          accumulator.usage,
-          accumulator.reasoning,
-          reasoningSettingsFromResponse(body.reasoning),
-        );
+      if (body) {
+        const output = Array.isArray(completedPayload?.output)
+          ? completedPayload.output
+          : [];
+        const summaryAvailable = output.some((rawItem) => {
+          if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+            return false;
+          }
+          const item = rawItem as Record<string, unknown>;
+          return item.type === "reasoning" && Array.isArray(item.summary) &&
+            item.summary.some((rawPart) => {
+              if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) {
+                return false;
+              }
+              const text = (rawPart as Record<string, unknown>).text;
+              return typeof text === "string" && text.trim().length > 0;
+            });
+        });
+        const usage = completedPayload?.usage;
         this.diagnostics.recordGeneration({
           endpoint: "responses",
-          requestId: accumulator.id,
+          requestId: bridgeResponseId ?? "unknown-response",
           model: body.model,
           stream: body.stream,
           outcome,
           durationMs: Date.now() - startedAt,
-          usage: usageTokenCounts(accumulator.usage),
-          reasoning: disclosure,
-          toolCalls: accumulator.toolCalls.length,
-          finishReason: accumulator.finishReason,
+          usage: usageTokenCounts(usage),
+          reasoning: reasoningDisclosure(
+            usage,
+            summaryAvailable ? "available" : "",
+            reasoningSettingsFromResponse(body.reasoning),
+          ),
+          toolCalls: output.filter((rawItem) =>
+            Boolean(
+              rawItem &&
+              typeof rawItem === "object" &&
+              !Array.isArray(rawItem) &&
+              (rawItem as Record<string, unknown>).type === "function_call",
+            )
+          ).length,
           ...(errorCode ? { errorCode } : {}),
         });
       }

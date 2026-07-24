@@ -4,7 +4,8 @@ import { writeJsonAtomic } from "./json-file.js";
 
 export type ResponseMapping = {
   responseId: string;
-  chatId: string;
+  chatId?: string;
+  nativeResponseId?: string;
   createdAt: number;
 };
 
@@ -30,7 +31,7 @@ export class MappingStore {
         await readFile(store.path, "utf8"),
       ) as MappingFile;
       for (const mapping of file.mappings ?? []) {
-        if (mapping.responseId && mapping.chatId) {
+        if (mapping.responseId) {
           store.mappings.set(mapping.responseId, mapping);
         }
       }
@@ -46,10 +47,10 @@ export class MappingStore {
     return this.mappings.get(responseId);
   }
 
-  async set(responseId: string, chatId: string) {
+  async set(responseId: string, nativeResponseId: string) {
     this.mappings.set(responseId, {
       responseId,
-      chatId,
+      nativeResponseId,
       createdAt: Math.floor(Date.now() / 1000),
     });
 

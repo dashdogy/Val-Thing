@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const COMPANION_LAUNCH_URL = "val-openai-bridge://launch";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -74,7 +74,13 @@ export type RelayModelsRequest = {
   kind: "models";
 };
 
-export type RelayRequest = RelayModelsRequest | RelayCompletionRequest;
+export type RelayResponsesRequest = {
+  kind: "responses";
+  model: string;
+  body: JsonObject;
+};
+
+export type RelayRequest = RelayModelsRequest | RelayCompletionRequest | RelayResponsesRequest;
 
 export type ValModel = {
   id: string;
@@ -91,6 +97,7 @@ export type ValRelayEvent =
   | { kind: "replace"; content: string }
   | { kind: "usage"; usage: JsonObject }
   | { kind: "status"; data: JsonObject }
+  | { kind: "sse"; eventType: string; data: JsonObject }
   | { kind: "error"; error: RelayError };
 
 export type RelayAccepted = {

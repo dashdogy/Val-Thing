@@ -10,6 +10,7 @@ import {
   type RelayCompletionRequest,
   type RelayError,
   type RelayRequest,
+  type RelayResponsesRequest,
   type ServerToExtensionMessage,
   type ValModel,
 } from "@val-bridge/protocol";
@@ -32,6 +33,7 @@ import {
 import {
   createSessionUsageStats,
   recordUsageRequest,
+  responseUsageDetails,
   restoreSessionUsageStats,
   settleUsageRequest,
   type SessionUsageStats,
@@ -106,6 +108,7 @@ let bridgeReconnectDelay = 1_000;
 let modelCache: { expiresAt: number; models: ValModel[] } | null = null;
 const pendingByRequest = new Map<string, PendingCompletion>();
 const pendingByMessage = new Map<string, PendingCompletion>();
+const pendingResponses = new Map<string, AbortController>();
 let usageStats = createSessionUsageStats();
 let usageStatsWrite: Promise<void> = Promise.resolve();
 let extensionUpdateStatus = createUpdateStatus(EXTENSION_VERSION);
@@ -672,9 +675,210 @@ async function handleRelayRequest(id: string, request: RelayRequest) {
       sendBridge({ type: "relay.done", id, result: { models } });
       return;
     }
+    if (request.kind === "responses") {
+      await startResponses(id, request);
+      return;
+    }
     await startCompletion(id, request);
   } catch (error) {
     sendBridge({ type: "relay.error", id, error: relayError(error) });
+  }
+}
+
+async function startResponses(
+  requestId: string,
+  request: RelayResponsesRequest,
+) {
+  const token = await ensureToken();
+  if (!token) {
+    sendBridge({
+      type: "relay.error",
+      id: requestId,
+      error: {
+        code: "val_session_unavailable",
+        message: "Open and sign in to Val.",
+        status: 503,
+      },
+    });
+    return;
+  }
+
+  const controller = new AbortController();
+  pendingResponses.set(requestId, controller);
+  recordPendingRequest();
+  let usage: Record<string, unknown> | undefined;
+  let reasoningSummaryAvailable = false;
+  let statsSettled = false;
+  const settleResponseRequest = (outcome: UsageOutcome) => {
+    if (statsSettled) return;
+    statsSettled = true;
+    usageStats = settleUsageRequest(
+      usageStats,
+      usage,
+      outcome,
+      Date.now(),
+      request.model,
+      { reasoningSummaryAvailable },
+    );
+    persistUsageStats();
+  };
+  const captureUsage = (value: unknown) => {
+    const details = responseUsageDetails(value);
+    usage = details.usage;
+    reasoningSummaryAvailable = details.reasoningSummaryAvailable;
+  };
+
+  sendBridge({
+    type: "relay.accepted",
+    id: requestId,
+    accepted: {},
+  });
+
+  const isStreaming = request.body.stream === true;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+  };
+  if (isStreaming) {
+    headers.Accept = "text/event-stream";
+  }
+
+  try {
+    const response = await fetch(`${VAL_ORIGIN}/openai/v1/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request.body),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      let detail: string | undefined;
+      try {
+        const parsed = JSON.parse(text);
+        detail = parsed.error?.message ?? parsed.detail ?? text;
+      } catch {
+        detail = text;
+      }
+      sendBridge({
+        type: "relay.error",
+        id: requestId,
+        error: {
+          code: "val_upstream_error",
+          message: detail ?? `Val returned ${response.status}.`,
+          status: response.status,
+        },
+      });
+      settleResponseRequest("failed");
+      return;
+    }
+
+    if (!isStreaming) {
+      const body = (await response.json()) as Record<string, unknown>;
+      captureUsage(body);
+      sendBridge({
+        type: "relay.event",
+        id: requestId,
+        event: {
+          kind: "sse",
+          eventType: "response.completed",
+          data: body as JsonObject,
+        },
+      });
+      settleResponseRequest("completed");
+      sendBridge({ type: "relay.done", id: requestId, result: {} });
+      return;
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      settleResponseRequest("completed");
+      sendBridge({
+        type: "relay.done",
+        id: requestId,
+        result: {},
+      });
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+
+      for (const part of parts) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+
+        let eventType = "";
+        let dataValue = "";
+
+        for (const line of trimmed.split("\n")) {
+          if (line.startsWith("event:")) {
+            eventType = line.slice("event:".length).trim();
+          } else if (line.startsWith("data:")) {
+            dataValue = line.slice("data:".length).trim();
+          }
+        }
+
+        if (!dataValue) continue;
+        if (dataValue === "[DONE]") continue;
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(dataValue);
+        } catch {
+          continue;
+        }
+
+        if (!parsed || typeof parsed !== "object") continue;
+
+        const parsedRecord = parsed as Record<string, unknown>;
+        if (parsedRecord.type === "response.completed") {
+          captureUsage(parsedRecord);
+        }
+
+        sendBridge({
+          type: "relay.event",
+          id: requestId,
+          event: {
+            kind: "sse",
+            eventType:
+              eventType ||
+              (typeof parsedRecord.type === "string"
+                ? parsedRecord.type
+                : "message"),
+            data: parsed as JsonObject,
+          },
+        });
+      }
+    }
+
+    settleResponseRequest("completed");
+    sendBridge({
+      type: "relay.done",
+      id: requestId,
+      result: {},
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      settleResponseRequest("cancelled");
+      return;
+    }
+    settleResponseRequest("failed");
+    sendBridge({
+      type: "relay.error",
+      id: requestId,
+      error: relayError(error),
+    });
+  } finally {
+    pendingResponses.delete(requestId);
   }
 }
 
@@ -1508,13 +1712,20 @@ function cleanupPending(pending: PendingCompletion) {
 
 async function cancelRelay(requestId: string) {
   const pending = pendingByRequest.get(requestId);
-  if (!pending || pending.finished) return;
-  pending.cancelRequested = true;
-  pending.finished = true;
-  settlePendingRequest(pending, "cancelled");
-  if (pending.taskId) {
-    await stopValTask(pending.taskId);
-    cleanupPending(pending);
+  if (pending && !pending.finished) {
+    pending.cancelRequested = true;
+    pending.finished = true;
+    settlePendingRequest(pending, "cancelled");
+    if (pending.taskId) {
+      await stopValTask(pending.taskId);
+      cleanupPending(pending);
+    }
+    return;
+  }
+  const responsesAbort = pendingResponses.get(requestId);
+  if (responsesAbort) {
+    responsesAbort.abort();
+    pendingResponses.delete(requestId);
   }
 }
 
@@ -1819,7 +2030,7 @@ async function popupStatus(): Promise<PopupStatus> {
       ...usageStats,
       activeRequests: [...pendingByRequest.values()].filter(
         (pending) => !pending.finished,
-      ).length,
+      ).length + pendingResponses.size,
     },
   };
 }

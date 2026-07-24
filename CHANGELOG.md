@@ -2,6 +2,17 @@
 
 All notable changes to Val OpenAI Local Bridge are documented here.
 
+## 0.1.10 - 2026-07-24
+
+- Routed `/v1/responses` through Val's native `/openai/v1/responses` endpoint,
+  preserving encrypted reasoning items and `reasoning.context: "all_turns"` for
+  stateful tool-call loops.
+- Bumped the bridge protocol to version 3 with a new SSE relay event for
+  transparent Responses-proxy streaming.
+- Removed the five-minute timeout ceiling for Responses requests; added a
+  dedicated `VAL_BRIDGE_RESPONSE_TIMEOUT_MS` setting (default 0 = no timeout).
+- Raised the maximum configurable request timeout to 30 minutes.
+
 ## 0.1.3 - 2026-07-24
 
 - Fixed the macOS companion URL-handler bundle by declaring its required

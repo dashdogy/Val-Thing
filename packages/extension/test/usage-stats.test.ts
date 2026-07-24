@@ -5,6 +5,7 @@ import {
   estimateOpenAICostNanodollars,
   recordUsageRequest,
   reasoningTokensFromUsage,
+  responseUsageDetails,
   restoreSessionUsageStats,
   settleUsageRequest,
   usageCounts,
@@ -30,6 +31,34 @@ test("normalizes OpenAI and Val token usage shapes", () => {
     totalTokens: 10,
   });
   assert.equal(usageCounts({ duration_ms: 10 }), null);
+});
+
+test("extracts usage and reasoning summaries from Responses payloads", () => {
+  const usage = {
+    input_tokens: 12,
+    output_tokens: 8,
+    total_tokens: 20,
+    output_tokens_details: { reasoning_tokens: 5 },
+  };
+  assert.deepEqual(
+    responseUsageDetails({
+      type: "response.completed",
+      response: {
+        usage,
+        output: [
+          {
+            type: "reasoning",
+            summary: [{ type: "summary_text", text: "Checked constraints." }],
+          },
+        ],
+      },
+    }),
+    { usage, reasoningSummaryAvailable: true },
+  );
+  assert.deepEqual(responseUsageDetails({ usage, output: [] }), {
+    usage,
+    reasoningSummaryAvailable: false,
+  });
 });
 
 test("tracks metered requests and outcomes without storing content", () => {

@@ -6,6 +6,7 @@ import test from "node:test";
 import type {
   ExtensionToServerMessage,
   RelayCompletionRequest,
+  RelayResponsesRequest,
   ServerToExtensionMessage,
 } from "@val-bridge/protocol";
 import { PROTOCOL_VERSION } from "@val-bridge/protocol";
@@ -35,6 +36,7 @@ class FakeValExtension {
   bridgeSecret = "";
   clientApiKey = "";
   readonly relayRequests: RelayCompletionRequest[] = [];
+  readonly responsesRequests: RelayResponsesRequest[] = [];
   readonly cancelledRequestIds: string[] = [];
   readonly heldRequestIds: string[] = [];
   reloadRequests = 0;
@@ -162,8 +164,361 @@ class FakeValExtension {
       });
       return;
     }
-
-    const relay = message.request;
+    if (message.request.kind === "responses") {
+      const relay = message.request;
+      this.responsesRequests.push(relay);
+      const requestText = JSON.stringify(relay.body);
+      if (requestText.includes("STREAM_ERROR")) {
+        this.send({
+          type: "relay.accepted",
+          id: message.id,
+          accepted: {},
+        });
+        this.send({
+          type: "relay.error",
+          id: message.id,
+          error: {
+            code: "val_upstream_error",
+            message: "Val rejected the streamed request.",
+            status: 400,
+          },
+        });
+        return;
+      }
+      const nativeId = `resp_native_${++this.chatCounter}`;
+      if (requestText.includes("REASONING_SUMMARY")) {
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.created",
+            data: {
+              type: "response.created",
+              response: {
+                id: nativeId,
+                model: relay.model,
+                object: "response",
+                output: [],
+              },
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.in_progress",
+            data: {
+              type: "response.in_progress",
+              response: {
+                id: nativeId,
+                model: relay.model,
+                object: "response",
+                output: [],
+              },
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.output_item.added",
+            data: {
+              type: "response.output_item.added",
+              output_index: 0,
+              item: {
+                id: "rs_testreasoning",
+                type: "reasoning",
+                status: "in_progress",
+                summary: [],
+              },
+              sequence_number: 2,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.reasoning_summary_part.added",
+            data: {
+              type: "response.reasoning_summary_part.added",
+              item_id: "rs_testreasoning",
+              output_index: 0,
+              summary_index: 0,
+              part: { type: "summary_text", text: "" },
+              sequence_number: 3,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.reasoning_summary_text.delta",
+            data: {
+              type: "response.reasoning_summary_text.delta",
+              item_id: "rs_testreasoning",
+              output_index: 0,
+              summary_index: 0,
+              delta: "Inspect the constraints first.",
+              sequence_number: 3,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.reasoning_summary_text.done",
+            data: {
+              type: "response.reasoning_summary_text.done",
+              item_id: "rs_testreasoning",
+              output_index: 0,
+              summary_index: 0,
+              sequence_number: 4,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.reasoning_summary_part.done",
+            data: {
+              type: "response.reasoning_summary_part.done",
+              output_index: 0,
+              item: {
+                id: "rs_testreasoning",
+                type: "reasoning",
+                status: "completed",
+                summary: [
+                  {
+                    text: "Inspect the constraints first.",
+                    type: "summary_text",
+                  },
+                ],
+              },
+              sequence_number: 5,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.output_item.added",
+            data: {
+              type: "response.output_item.added",
+              output_index: 1,
+              item: {
+                id: "msg_test1",
+                type: "message",
+                status: "in_progress",
+                role: "assistant",
+                content: [],
+              },
+              sequence_number: 6,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.output_text.delta",
+            data: {
+              type: "response.output_text.delta",
+              item_id: "msg_test1",
+              output_index: 1,
+              content_index: 0,
+              delta: "reasoned-answer",
+              sequence_number: 7,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.completed",
+            data: {
+              type: "response.completed",
+              id: nativeId,
+              object: "response",
+              status: "completed",
+              model: relay.model,
+              output: [
+                {
+                  id: "rs_testreasoning",
+                  type: "reasoning",
+                  status: "completed",
+                  summary: [
+                    {
+                      text: "Inspect the constraints first.",
+                      type: "summary_text",
+                    },
+                  ],
+                },
+                {
+                  id: "msg_test1",
+                  type: "message",
+                  status: "completed",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: "reasoned-answer" }],
+                },
+              ],
+              usage: {
+                input_tokens: 20,
+                output_tokens: 30,
+                total_tokens: 50,
+                output_tokens_details: { reasoning_tokens: 6 },
+              },
+            },
+          },
+        });
+        this.send({ type: "relay.done", id: message.id, result: {} });
+        return;
+      }
+      this.send({
+        type: "relay.event",
+        id: message.id,
+        event: {
+          kind: "sse",
+          eventType: "response.created",
+          data: {
+            type: "response.created",
+            response: {
+              id: nativeId,
+              model: relay.model,
+              object: "response",
+              output: [],
+            },
+          },
+        },
+      });
+      this.send({
+        type: "relay.event",
+        id: message.id,
+        event: {
+          kind: "sse",
+          eventType: "response.in_progress",
+          data: {
+            type: "response.in_progress",
+            response: {
+              id: nativeId,
+              model: relay.model,
+              object: "response",
+              output: [],
+            },
+          },
+        },
+      });
+      this.send({
+        type: "relay.event",
+        id: message.id,
+        event: {
+          kind: "sse",
+          eventType: "response.output_item.added",
+          data: {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: {
+              id: "msg_testoutput",
+              type: "message",
+              status: "in_progress",
+              role: "assistant",
+              content: [],
+            },
+            sequence_number: 2,
+          },
+        },
+      });
+      const isStream =
+        requestText.includes("RESPONSES_STREAM") ||
+        (!requestText.includes("STORE_THIS") &&
+          !requestText.includes("CONTINUE"));
+      const responseContent = requestText.includes("CONTINUE")
+        ? "continued-ok"
+        : "bridge-ok";
+      if (isStream) {
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.output_text.delta",
+            data: {
+              type: "response.output_text.delta",
+              item_id: "msg_testoutput",
+              output_index: 0,
+              content_index: 0,
+              delta: responseContent.slice(0, 6),
+              sequence_number: 3,
+            },
+          },
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.output_text.delta",
+            data: {
+              type: "response.output_text.delta",
+              item_id: "msg_testoutput",
+              output_index: 0,
+              content_index: 0,
+              delta: responseContent.slice(6),
+              sequence_number: 4,
+            },
+          },
+        });
+      }
+      this.send({
+        type: "relay.event",
+        id: message.id,
+        event: {
+          kind: "sse",
+          eventType: "response.completed",
+          data: {
+            type: "response.completed",
+            id: nativeId,
+            object: "response",
+            status: "completed",
+            model: relay.model,
+            output: [
+              {
+                id: "msg_testoutput",
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [{ type: "output_text", text: responseContent }],
+              },
+            ],
+            usage: {
+              input_tokens: 15,
+              output_tokens: 20,
+              total_tokens: 35,
+            },
+          },
+        },
+      });
+      this.send({ type: "relay.done", id: message.id, result: {} });
+      return;
+    }
+    const relay = message.request as RelayCompletionRequest;
     this.relayRequests.push(relay);
     const requestText = JSON.stringify(relay.messages);
     const stored = relay.persistence.mode === "stored";
@@ -962,7 +1317,6 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   });
   assert.equal(storedResponse.status, "completed");
   assert.equal(storedResponse.output[0]?.type, "message");
-  assert.equal(storedResponse.metadata?.val_chat_id, "val-chat-1");
 
   const continuedResponse = await client.responses.create({
     model: "val-test",
@@ -970,12 +1324,6 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
     previous_response_id: storedResponse.id,
   });
   assert.equal(continuedResponse.status, "completed");
-  const continuationRelay = extension.relayRequests.at(-1);
-  assert.deepEqual(continuationRelay?.persistence, {
-    mode: "stored",
-    chatId: "val-chat-1",
-    appendToExisting: true,
-  });
 
   const responseStream = await client.responses.create({
     model: "val-test",
@@ -999,13 +1347,12 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
     input: "REASONING_SUMMARY",
     reasoning: { effort: "high", summary: "detailed" },
   });
-  assert.equal(
-    extension.relayRequests.at(-1)?.parameters?.reasoning_effort,
-    "high",
-  );
-  assert.equal(
-    extension.relayRequests.at(-1)?.parameters?.reasoning_summary,
-    "detailed",
+  assert.ok(
+    extension.responsesRequests.some((req) => {
+      const body = req.body as Record<string, unknown>;
+      const reasoning = body.reasoning as Record<string, unknown>;
+      return reasoning?.effort === "high" && reasoning?.summary === "detailed";
+    }),
   );
   const reasonedOutput = reasonedResponse.output as Array<{
     type: string;
@@ -1138,12 +1485,12 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
 
   const mappings = JSON.parse(
     await readFile(join(configDirectory, "response-mappings.json"), "utf8"),
-  ) as { mappings: Array<{ responseId: string; chatId: string }> };
+  ) as { mappings: Array<{ responseId: string; nativeResponseId: string }> };
   assert.ok(
     mappings.mappings.some(
       (mapping) =>
         mapping.responseId === storedResponse.id &&
-        mapping.chatId === "val-chat-1",
+        typeof mapping.nativeResponseId === "string",
     ),
   );
   assert.ok(!JSON.stringify(mappings).includes("STORE_THIS"));
@@ -1159,6 +1506,7 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   }, "sanitized diagnostics");
   const diagnostics = await readFile(server.diagnostics.path, "utf8");
   assert.match(diagnostics, /"event":"generation"/);
+  assert.match(diagnostics, /"endpoint":"responses"/);
   assert.match(diagnostics, /"requested_reasoning_effort":"max"/);
   assert.ok(!diagnostics.includes("HIDDEN_REASONING_PRIVATE_PROMPT"));
   assert.ok(!diagnostics.includes("private-answer"));
