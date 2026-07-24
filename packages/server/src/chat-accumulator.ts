@@ -5,6 +5,7 @@ import type {
   ValRelayEvent,
 } from "@val-bridge/protocol";
 import {
+  assistantTextFromContent,
   reasoningTextFromRecord,
   reasoningTextFromStatus,
   splitValReasoningMarkup,
@@ -34,19 +35,7 @@ type MutableToolCall = {
 };
 
 function textFromUnknown(value: unknown) {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value)) return "";
-  return value
-    .map((part) => {
-      if (!part || typeof part !== "object" || !("text" in part)) return "";
-      const type =
-        "type" in part ? String((part as { type?: unknown }).type ?? "") : "";
-      if (type && !["text", "input_text", "output_text"].includes(type)) {
-        return "";
-      }
-      return String((part as { text?: unknown }).text ?? "");
-    })
-    .join("");
+  return assistantTextFromContent(value);
 }
 
 function mergeStreamFragment(current: string, incoming: string) {

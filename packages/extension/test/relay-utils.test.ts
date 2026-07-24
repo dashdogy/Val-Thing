@@ -5,6 +5,7 @@ import type {
   RelayCompletionRequest,
 } from "@val-bridge/protocol";
 import {
+  assistantTextFromContent,
   buildValHistory,
   completionPayload,
   findValNativeToolTraces,
@@ -372,6 +373,47 @@ test("extracts Val reasoning aliases, summary items, and reasoning statuses", ()
     "part one and two",
   );
   assert.equal(
+    reasoningTextFromRecord({
+      reasoning_details: [
+        { type: "reasoning.text", text: "detail one" },
+        { type: "reasoning.text", text: " and two" },
+      ],
+    }),
+    "detail one and two",
+  );
+  assert.equal(
+    reasoningTextFromRecord({
+      data: {
+        type: "response.reasoning_summary_text.delta",
+        delta: "lifecycle summary",
+      },
+    }),
+    "lifecycle summary",
+  );
+  assert.equal(
+    reasoningTextFromRecord({
+      type: "response.reasoning_summary_text.delta",
+      delta: "outer lifecycle summary",
+    }),
+    "outer lifecycle summary",
+  );
+  assert.equal(
+    reasoningTextFromRecord({
+      content: [
+        { type: "reasoning_text", text: "content summary" },
+        { type: "output_text", text: "final answer" },
+      ],
+    }),
+    "content summary",
+  );
+  assert.equal(
+    assistantTextFromContent([
+      { type: "reasoning_text", text: "content summary" },
+      { type: "output_text", text: "final answer" },
+    ]),
+    "final answer",
+  );
+  assert.equal(
     reasoningTextFromStatus({
       type: "status",
       action: "reasoning",
@@ -386,6 +428,21 @@ test("extracts Val reasoning aliases, summary items, and reasoning statuses", ()
       description: "Searching",
     }),
     "",
+  );
+  assert.equal(
+    reasoningTextFromStatus({
+      type: "status",
+      action: "reasoning",
+      description: "Thinking...",
+    }),
+    "",
+  );
+  assert.equal(
+    reasoningTextFromStatus({
+      type: "status",
+      description: "Thinking through the dependency graph",
+    }),
+    "Thinking through the dependency graph",
   );
   assert.equal(
     reasoningTextFromRecord({

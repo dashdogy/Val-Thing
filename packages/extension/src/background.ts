@@ -14,6 +14,7 @@ import {
 } from "@val-bridge/protocol";
 import { io, type Socket } from "socket.io-client";
 import {
+  assistantTextFromContent,
   buildValHistory,
   completionPayload,
   findValNativeToolTraces,
@@ -969,6 +970,20 @@ async function handleValChatEvent(
       await finishCompletion(pending);
       return;
     }
+    const standaloneReasoning = reasoningTextFromRecord(data);
+    if (standaloneReasoning) {
+      pending.reasoningContent = mergeStreamFragment(
+        pending.reasoningContent,
+        standaloneReasoning,
+      );
+      if (!bufferClientTools) {
+        sendBridge({
+          type: "relay.event",
+          id: pending.requestId,
+          event: { kind: "openai", data: data as JsonObject },
+        });
+      }
+    }
     if (typeof data.content === "string") {
       pending.assistantContent = data.content;
       if (!bufferClientTools) {
@@ -1005,10 +1020,39 @@ async function handleValChatEvent(
     }
   } else if (type === "chat:completion:done" || type === "done") {
     await finishCompletion(pending);
+  } else if (/(?:reasoning|thinking)/i.test(type)) {
+    const reasoningRecord = { type, ...data };
+    const reasoning = reasoningTextFromRecord(reasoningRecord);
+    if (!reasoning) return;
+    pending.reasoningContent = mergeStreamFragment(
+      pending.reasoningContent,
+      reasoning,
+    );
+    if (!bufferClientTools) {
+      sendBridge({
+        type: "relay.event",
+        id: pending.requestId,
+        event: { kind: "openai", data: reasoningRecord as JsonObject },
+      });
+    }
   } else if (type === "chat:message:delta" || type === "message") {
-    const content = String(data.content ?? "");
+    const reasoning = reasoningTextFromRecord(data);
+    if (reasoning) {
+      pending.reasoningContent = mergeStreamFragment(
+        pending.reasoningContent,
+        reasoning,
+      );
+    }
+    const content = assistantTextFromContent(data.content);
     pending.assistantContent += content;
     if (!bufferClientTools) {
+      if (reasoning) {
+        sendBridge({
+          type: "relay.event",
+          id: pending.requestId,
+          event: { kind: "openai", data: data as JsonObject },
+        });
+      }
       sendBridge({
         type: "relay.event",
         id: pending.requestId,
@@ -1016,9 +1060,23 @@ async function handleValChatEvent(
       });
     }
   } else if (type === "chat:message" || type === "replace") {
-    const content = String(data.content ?? "");
+    const reasoning = reasoningTextFromRecord(data);
+    if (reasoning) {
+      pending.reasoningContent = mergeStreamFragment(
+        pending.reasoningContent,
+        reasoning,
+      );
+    }
+    const content = assistantTextFromContent(data.content);
     pending.assistantContent = content;
     if (!bufferClientTools) {
+      if (reasoning) {
+        sendBridge({
+          type: "relay.event",
+          id: pending.requestId,
+          event: { kind: "openai", data: data as JsonObject },
+        });
+      }
       sendBridge({
         type: "relay.event",
         id: pending.requestId,
@@ -1065,7 +1123,9 @@ function applyOpenAIData(
       choice.message && typeof choice.message === "object"
         ? (choice.message as Record<string, unknown>)
         : undefined;
-    const content = delta?.content ?? message?.content;
+    const content = assistantTextFromContent(
+      delta?.content ?? message?.content,
+    );
     const reasoning =
       reasoningTextFromRecord(delta) ||
       reasoningTextFromRecord(message) ||
@@ -1076,7 +1136,7 @@ function applyOpenAIData(
         reasoning,
       );
     }
-    if (typeof content === "string") {
+    if (content) {
       if (message) pending.assistantContent = content;
       else {
         pending.assistantContent = mergeStreamFragment(

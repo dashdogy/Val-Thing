@@ -46,6 +46,34 @@ function reasoningTextParts(value: unknown): string {
   return "";
 }
 
+export function assistantTextFromContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!isRecord(part)) return "";
+      const type = typeof part.type === "string" ? part.type.toLowerCase() : "";
+      if (
+        type.includes("reasoning") ||
+        type.includes("thinking") ||
+        type === "summary_text"
+      ) {
+        return "";
+      }
+      if (
+        type &&
+        !["text", "input_text", "output_text", "content"].includes(type)
+      ) {
+        return "";
+      }
+      if (typeof part.text === "string") return part.text;
+      if (typeof part.content === "string") return part.content;
+      return assistantTextFromContent(part.content);
+    })
+    .join("");
+}
+
 function firstReasoningText(values: unknown[]) {
   for (const value of values) {
     const text = reasoningTextParts(value);
@@ -103,6 +131,8 @@ export function reasoningTextFromRecord(
   const direct = firstReasoningText([
     record.reasoning_content,
     record.reasoning_text,
+    record.reasoning_details,
+    record.reasoning_summary,
     record.thinking,
     record.reasoning,
   ]);
@@ -117,6 +147,24 @@ export function reasoningTextFromRecord(
       record.summary,
     ]);
     if (eventText) return normalizeValReasoningText(eventText);
+  }
+  if (Array.isArray(record.content)) {
+    for (const part of record.content) {
+      if (!isRecord(part)) continue;
+      const partType =
+        typeof part.type === "string" ? part.type.toLowerCase() : "";
+      if (
+        !partType.includes("reasoning") &&
+        !partType.includes("thinking") &&
+        partType !== "summary_text"
+      ) {
+        continue;
+      }
+      const partText =
+        reasoningTextFromRecord(part) ||
+        firstReasoningText([part.text, part.content, part.summary, part.delta]);
+      if (partText) return normalizeValReasoningText(partText);
+    }
   }
   if (isRecord(record.item)) {
     const itemText: string = reasoningTextFromRecord(record.item);
@@ -136,7 +184,32 @@ export function reasoningTextFromRecord(
       if (itemText) return normalizeValReasoningText(itemText);
     }
   }
+  for (const nested of [record.data, record.response]) {
+    if (!isRecord(nested) || nested === record) continue;
+    const nestedText = reasoningTextFromRecord(nested);
+    if (nestedText) return nestedText;
+  }
   return "";
+}
+
+function isReasoningStatusPlaceholder(text: string) {
+  const normalized = text
+    .trim()
+    .toLowerCase()
+    .replace(/[.…!?:-]+$/g, "")
+    .replace(/\s+/g, " ");
+  return [
+    "thinking",
+    "reasoning",
+    "analyzing",
+    "analysing",
+    "processing",
+    "working",
+    "starting reasoning",
+    "reasoning started",
+    "reasoning complete",
+    "reasoning completed",
+  ].includes(normalized);
 }
 
 export function reasoningTextFromStatus(record: Record<string, unknown>) {
@@ -151,7 +224,7 @@ export function reasoningTextFromStatus(record: Record<string, unknown>) {
     .join(" ")
     .toLowerCase();
   if (!/(reason|think)/.test(marker)) return "";
-  return (
+  const text =
     reasoningTextFromRecord(record) ||
     normalizeValReasoningText(
       firstReasoningText([
@@ -160,8 +233,8 @@ export function reasoningTextFromStatus(record: Record<string, unknown>) {
         record.summary,
         record.description,
       ]),
-    )
-  );
+    );
+  return isReasoningStatusPlaceholder(text) ? "" : text;
 }
 
 function nextReasoningTag(content: string, from: number) {

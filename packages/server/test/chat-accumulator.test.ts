@@ -185,6 +185,73 @@ test("accepts explicit reasoning status records but ignores ordinary statuses", 
     chunks[0]?.choices[0]?.delta.reasoning_content,
     "Comparing both approaches",
   );
+  assert.deepEqual(
+    accumulator.consume({
+      kind: "status",
+      data: {
+        type: "reasoning",
+        description: "Thinking...",
+        done: false,
+      },
+    }),
+    [],
+  );
+  const descriptionAccumulator = new ChatAccumulator("val-model");
+  assert.equal(
+    descriptionAccumulator.consume({
+      kind: "status",
+      data: {
+        type: "status",
+        description: "Thinking through the dependency graph",
+      },
+    })[0]?.choices[0]?.delta.reasoning_content,
+    "Thinking through the dependency graph",
+  );
+});
+
+test("extracts reasoning from OpenAI detail arrays and Responses lifecycle events", () => {
+  const accumulator = new ChatAccumulator("val-model");
+  const contentPartChunks = accumulator.consume({
+    kind: "openai",
+    data: {
+      choices: [
+        {
+          index: 0,
+          delta: {
+            content: [
+              { type: "reasoning_text", text: "Check both constraints." },
+              { type: "output_text", text: "The result is 301." },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    },
+  });
+
+  assert.equal(
+    contentPartChunks[0]?.choices[0]?.delta.reasoning_content,
+    "Check both constraints.",
+  );
+  assert.equal(
+    contentPartChunks[0]?.choices[0]?.delta.content,
+    "The result is 301.",
+  );
+
+  const lifecycleAccumulator = new ChatAccumulator("val-model");
+  const lifecycleChunks = lifecycleAccumulator.consume({
+    kind: "openai",
+    data: {
+      type: "response.reasoning_summary_text.delta",
+      item_id: "rs_1",
+      summary_index: 0,
+      delta: "Compare the candidate values.",
+    },
+  });
+  assert.equal(
+    lifecycleChunks[0]?.choices[0]?.delta.reasoning_content,
+    "Compare the candidate values.",
+  );
 });
 
 test("assembles split tool-call deltas and preserves finish reasons", () => {

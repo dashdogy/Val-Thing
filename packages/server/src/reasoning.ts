@@ -18,6 +18,34 @@ function textParts(value: unknown): string {
   return "";
 }
 
+export function assistantTextFromContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!isRecord(part)) return "";
+      const type = typeof part.type === "string" ? part.type.toLowerCase() : "";
+      if (
+        type.includes("reasoning") ||
+        type.includes("thinking") ||
+        type === "summary_text"
+      ) {
+        return "";
+      }
+      if (
+        type &&
+        !["text", "input_text", "output_text", "content"].includes(type)
+      ) {
+        return "";
+      }
+      if (typeof part.text === "string") return part.text;
+      if (typeof part.content === "string") return part.content;
+      return assistantTextFromContent(part.content);
+    })
+    .join("");
+}
+
 function firstText(values: unknown[]) {
   for (const value of values) {
     const text = textParts(value);
@@ -82,6 +110,8 @@ export function reasoningTextFromRecord(
   const direct = firstText([
     record.reasoning_content,
     record.reasoning_text,
+    record.reasoning_details,
+    record.reasoning_summary,
     record.thinking,
     record.reasoning,
   ]);
@@ -96,6 +126,25 @@ export function reasoningTextFromRecord(
       record.summary,
     ]);
     if (eventText) return normalizeValReasoningText(eventText);
+  }
+
+  if (Array.isArray(record.content)) {
+    for (const part of record.content) {
+      if (!isRecord(part)) continue;
+      const partType =
+        typeof part.type === "string" ? part.type.toLowerCase() : "";
+      if (
+        !partType.includes("reasoning") &&
+        !partType.includes("thinking") &&
+        partType !== "summary_text"
+      ) {
+        continue;
+      }
+      const partText =
+        reasoningTextFromRecord(part) ||
+        firstText([part.text, part.content, part.summary, part.delta]);
+      if (partText) return normalizeValReasoningText(partText);
+    }
   }
 
   if (isRecord(record.item)) {
@@ -118,7 +167,33 @@ export function reasoningTextFromRecord(
     }
   }
 
+  for (const nested of [record.data, record.response]) {
+    if (!isRecord(nested) || nested === record) continue;
+    const nestedText = reasoningTextFromRecord(nested);
+    if (nestedText) return nestedText;
+  }
+
   return "";
+}
+
+function isReasoningStatusPlaceholder(text: string) {
+  const normalized = text
+    .trim()
+    .toLowerCase()
+    .replace(/[.…!?:-]+$/g, "")
+    .replace(/\s+/g, " ");
+  return [
+    "thinking",
+    "reasoning",
+    "analyzing",
+    "analysing",
+    "processing",
+    "working",
+    "starting reasoning",
+    "reasoning started",
+    "reasoning complete",
+    "reasoning completed",
+  ].includes(normalized);
 }
 
 export function reasoningTextFromStatus(record: JsonRecord): string {
@@ -134,7 +209,7 @@ export function reasoningTextFromStatus(record: JsonRecord): string {
     .toLowerCase();
   if (!/(reason|think)/.test(marker)) return "";
 
-  return (
+  const text =
     reasoningTextFromRecord(record) ||
     normalizeValReasoningText(
       firstText([
@@ -143,8 +218,8 @@ export function reasoningTextFromStatus(record: JsonRecord): string {
         record.summary,
         record.description,
       ]),
-    )
-  );
+    );
+  return isReasoningStatusPlaceholder(text) ? "" : text;
 }
 
 type OpeningTag = {
