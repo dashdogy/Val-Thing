@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 2;
 export const COMPANION_LAUNCH_URL = "val-openai-bridge://launch";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -80,7 +80,8 @@ export type RelayResponsesRequest = {
   body: JsonObject;
 };
 
-export type RelayRequest = RelayModelsRequest | RelayCompletionRequest | RelayResponsesRequest;
+export type RelayRequest =
+  RelayModelsRequest | RelayCompletionRequest | RelayResponsesRequest;
 
 export type ValModel = {
   id: string;
@@ -126,6 +127,7 @@ export type ExtensionStatus = {
   valSession: boolean;
   valSocket: boolean;
   compatible: boolean;
+  nativeResponses?: boolean;
   lastError?: string;
 };
 

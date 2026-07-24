@@ -30,6 +30,7 @@ import {
   type BuiltHistory,
   type ParsedClientToolCall,
 } from "./relay-utils.js";
+import { SseParser, type ParsedSseEvent } from "./sse-parser.js";
 import {
   createSessionUsageStats,
   recordUsageRequest,
@@ -172,6 +173,7 @@ let extensionStatus: ExtensionStatus = {
   valSession: false,
   valSocket: false,
   compatible: true,
+  nativeResponses: true,
 };
 
 function relayError(
@@ -280,6 +282,12 @@ function updateBadge() {
 function sendBridge(message: ExtensionToServerMessage) {
   if (bridgeSocket?.readyState === WebSocket.OPEN) {
     bridgeSocket.send(JSON.stringify(message));
+  }
+}
+
+function abortPendingResponses() {
+  for (const controller of pendingResponses.values()) {
+    controller.abort();
   }
 }
 
@@ -542,6 +550,7 @@ async function connectBridge() {
   }
   const { secret, url } = await getBridgeSettings();
   if (!secret) {
+    abortPendingResponses();
     const socket = bridgeSocket;
     bridgeSocket = null;
     socket?.close();
@@ -550,6 +559,7 @@ async function connectBridge() {
     updateBadge();
     return;
   }
+  abortPendingResponses();
   const previousSocket = bridgeSocket;
   bridgeSocket = null;
   previousSocket?.close();
@@ -597,6 +607,7 @@ async function connectBridge() {
   });
   socket.addEventListener("close", () => {
     if (bridgeSocket !== socket) return;
+    abortPendingResponses();
     bridgeAuthenticated = false;
     clientApiKey = "";
     updateBadge();
@@ -624,6 +635,7 @@ function reloadExtensionCleanly() {
     clearTimeout(bridgeReconnectTimer);
     bridgeReconnectTimer = undefined;
   }
+  abortPendingResponses();
   const socket = bridgeSocket;
   bridgeSocket = null;
   socket?.close();
@@ -727,6 +739,53 @@ async function startResponses(
     usage = details.usage;
     reasoningSummaryAvailable = details.reasoningSummaryAvailable;
   };
+  let terminalEvent:
+    | "response.completed"
+    | "response.failed"
+    | "response.incomplete"
+    | undefined;
+  const relaySseEvent = (event: ParsedSseEvent) => {
+    if (event.data.trim() === "[DONE]") return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(event.data);
+    } catch {
+      throw {
+        code: "val_invalid_response_stream",
+        message: "Val returned malformed Responses stream data.",
+        status: 502,
+      };
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw {
+        code: "val_invalid_response_stream",
+        message: "Val returned a non-object Responses stream event.",
+        status: 502,
+      };
+    }
+    const data = parsed as Record<string, unknown>;
+    const eventType =
+      event.eventType === "message" && typeof data.type === "string"
+        ? data.type
+        : event.eventType;
+    if (
+      eventType === "response.completed" ||
+      eventType === "response.failed" ||
+      eventType === "response.incomplete"
+    ) {
+      terminalEvent = eventType;
+      captureUsage(data);
+    }
+    sendBridge({
+      type: "relay.event",
+      id: requestId,
+      event: {
+        kind: "sse",
+        eventType,
+        data: data as JsonObject,
+      },
+    });
+  };
 
   sendBridge({
     type: "relay.accepted",
@@ -752,11 +811,23 @@ async function startResponses(
     });
 
     if (!response.ok) {
-      const text = await response.text();
+      if (response.status === 401) await setSessionToken("");
+      const text = (await response.text()).slice(0, 4_096);
       let detail: string | undefined;
       try {
-        const parsed = JSON.parse(text);
-        detail = parsed.error?.message ?? parsed.detail ?? text;
+        const parsed = JSON.parse(text) as Record<string, unknown>;
+        const error =
+          parsed.error &&
+          typeof parsed.error === "object" &&
+          !Array.isArray(parsed.error)
+            ? (parsed.error as Record<string, unknown>)
+            : undefined;
+        detail =
+          typeof error?.message === "string"
+            ? error.message
+            : typeof parsed.detail === "string"
+              ? parsed.detail
+              : text;
       } catch {
         detail = text;
       }
@@ -764,7 +835,10 @@ async function startResponses(
         type: "relay.error",
         id: requestId,
         error: {
-          code: "val_upstream_error",
+          code:
+            response.status === 429
+              ? "rate_limit_exceeded"
+              : "val_upstream_error",
           message: detail ?? `Val returned ${response.status}.`,
           status: response.status,
         },
@@ -774,93 +848,84 @@ async function startResponses(
     }
 
     if (!isStreaming) {
-      const body = (await response.json()) as Record<string, unknown>;
+      const parsed = (await response.json()) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw {
+          code: "val_invalid_response",
+          message: "Val returned an invalid Responses object.",
+          status: 502,
+        };
+      }
+      const body = parsed as Record<string, unknown>;
+      const status = body.status;
+      const eventType =
+        status === "failed"
+          ? "response.failed"
+          : status === "incomplete"
+            ? "response.incomplete"
+            : status === "completed"
+              ? "response.completed"
+              : undefined;
+      if (!eventType) {
+        throw {
+          code: "val_incomplete_response",
+          message:
+            "Val ended a non-streaming response without a terminal status.",
+          status: 502,
+        };
+      }
       captureUsage(body);
       sendBridge({
         type: "relay.event",
         id: requestId,
         event: {
           kind: "sse",
-          eventType: "response.completed",
+          eventType,
           data: body as JsonObject,
         },
       });
-      settleResponseRequest("completed");
+      settleResponseRequest(
+        eventType === "response.completed" ? "completed" : "failed",
+      );
       sendBridge({ type: "relay.done", id: requestId, result: {} });
       return;
     }
 
     const reader = response.body?.getReader();
     if (!reader) {
-      settleResponseRequest("completed");
-      sendBridge({
-        type: "relay.done",
-        id: requestId,
-        result: {},
-      });
-      return;
+      throw {
+        code: "val_invalid_response_stream",
+        message: "Val returned an empty Responses stream.",
+        status: 502,
+      };
     }
 
     const decoder = new TextDecoder();
-    let buffer = "";
+    const parser = new SseParser();
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop() ?? "";
-
-      for (const part of parts) {
-        const trimmed = part.trim();
-        if (!trimmed) continue;
-
-        let eventType = "";
-        let dataValue = "";
-
-        for (const line of trimmed.split("\n")) {
-          if (line.startsWith("event:")) {
-            eventType = line.slice("event:".length).trim();
-          } else if (line.startsWith("data:")) {
-            dataValue = line.slice("data:".length).trim();
-          }
-        }
-
-        if (!dataValue) continue;
-        if (dataValue === "[DONE]") continue;
-
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(dataValue);
-        } catch {
-          continue;
-        }
-
-        if (!parsed || typeof parsed !== "object") continue;
-
-        const parsedRecord = parsed as Record<string, unknown>;
-        if (parsedRecord.type === "response.completed") {
-          captureUsage(parsedRecord);
-        }
-
-        sendBridge({
-          type: "relay.event",
-          id: requestId,
-          event: {
-            kind: "sse",
-            eventType:
-              eventType ||
-              (typeof parsedRecord.type === "string"
-                ? parsedRecord.type
-                : "message"),
-            data: parsed as JsonObject,
-          },
-        });
+      for (const event of parser.push(
+        decoder.decode(value, { stream: true }),
+      )) {
+        relaySseEvent(event);
       }
     }
+    for (const event of parser.finish(decoder.decode())) {
+      relaySseEvent(event);
+    }
 
-    settleResponseRequest("completed");
+    if (!terminalEvent) {
+      throw {
+        code: "val_incomplete_response_stream",
+        message: "Val ended the Responses stream before a terminal event.",
+        status: 502,
+      };
+    }
+    settleResponseRequest(
+      terminalEvent === "response.completed" ? "completed" : "failed",
+    );
     sendBridge({
       type: "relay.done",
       id: requestId,
@@ -1725,7 +1790,6 @@ async function cancelRelay(requestId: string) {
   const responsesAbort = pendingResponses.get(requestId);
   if (responsesAbort) {
     responsesAbort.abort();
-    pendingResponses.delete(requestId);
   }
 }
 
@@ -2028,9 +2092,9 @@ async function popupStatus(): Promise<PopupStatus> {
     update: extensionUpdateStatus,
     stats: {
       ...usageStats,
-      activeRequests: [...pendingByRequest.values()].filter(
-        (pending) => !pending.finished,
-      ).length + pendingResponses.size,
+      activeRequests:
+        [...pendingByRequest.values()].filter((pending) => !pending.finished)
+          .length + pendingResponses.size,
     },
   };
 }

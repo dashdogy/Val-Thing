@@ -68,7 +68,12 @@ export function loadRuntimeConfig(
       integerFromEnv("VAL_BRIDGE_MAX_CONCURRENCY", 4, 1, 32),
     requestTimeoutMs:
       overrides.requestTimeoutMs ??
-      integerFromEnv("VAL_BRIDGE_REQUEST_TIMEOUT_MS", 300_000, 1_000, 1_800_000),
+      integerFromEnv(
+        "VAL_BRIDGE_REQUEST_TIMEOUT_MS",
+        300_000,
+        1_000,
+        1_800_000,
+      ),
     responseTimeoutMs:
       overrides.responseTimeoutMs ??
       integerFromEnv("VAL_BRIDGE_RESPONSE_TIMEOUT_MS", 0, 0, 3_600_000),

@@ -76,6 +76,10 @@ export class BridgeHub {
     );
   }
 
+  supportsNativeResponses() {
+    return this.status.nativeResponses === true;
+  }
+
   attach(socket: WebSocket, originExtensionId: string) {
     const connection: ActiveExtension = {
       socket,
@@ -174,12 +178,30 @@ export class BridgeHub {
       case "bridge.pong":
       case "bridge.auth":
         break;
-      case "relay.accepted":
-        this.pending.get(message.id)?.callbacks.onAccepted?.(message.accepted);
+      case "relay.accepted": {
+        const pending = this.pending.get(message.id);
+        if (!pending) break;
+        try {
+          pending.callbacks.onAccepted?.(message.accepted);
+        } catch (error) {
+          this.sendActive({ type: "relay.cancel", id: message.id });
+          this.cleanupPending(message.id, pending);
+          pending.reject(error);
+        }
         break;
-      case "relay.event":
-        this.pending.get(message.id)?.callbacks.onEvent?.(message.event);
+      }
+      case "relay.event": {
+        const pending = this.pending.get(message.id);
+        if (!pending) break;
+        try {
+          pending.callbacks.onEvent?.(message.event);
+        } catch (error) {
+          this.sendActive({ type: "relay.cancel", id: message.id });
+          this.cleanupPending(message.id, pending);
+          pending.reject(error);
+        }
         break;
+      }
       case "relay.done": {
         const pending = this.pending.get(message.id);
         if (pending) {

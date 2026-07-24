@@ -47,6 +47,7 @@ class FakeValExtension {
     readonly origin = EXTENSION_ORIGIN,
     readonly extensionId = EXTENSION_ID,
     readonly modelId = "val-test",
+    readonly nativeResponses = true,
   ) {}
 
   async pair() {
@@ -129,6 +130,7 @@ class FakeValExtension {
           valSession: true,
           valSocket: true,
           compatible: true,
+          nativeResponses: this.nativeResponses,
         },
       });
       return;
@@ -181,6 +183,64 @@ class FakeValExtension {
             code: "val_upstream_error",
             message: "Val rejected the streamed request.",
             status: 400,
+          },
+        });
+        return;
+      }
+      if (requestText.includes("NATIVE_INCOMPLETE")) {
+        this.send({
+          type: "relay.accepted",
+          id: message.id,
+          accepted: {},
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.created",
+            data: {
+              type: "response.created",
+              response: {
+                id: "resp_incomplete",
+                model: relay.model,
+                object: "response",
+                output: [],
+              },
+            },
+          },
+        });
+        this.send({ type: "relay.done", id: message.id, result: {} });
+        return;
+      }
+      if (requestText.includes("HOLD_NATIVE")) {
+        this.send({
+          type: "relay.accepted",
+          id: message.id,
+          accepted: {},
+        });
+        this.heldRequestIds.push(message.id);
+        return;
+      }
+      if (requestText.includes("INVALID_NATIVE_EVENT")) {
+        this.send({
+          type: "relay.accepted",
+          id: message.id,
+          accepted: {},
+        });
+        this.send({
+          type: "relay.event",
+          id: message.id,
+          event: {
+            kind: "sse",
+            eventType: "response.completed\ninjected",
+            data: {
+              type: "response.completed",
+              id: "resp_invalid_event",
+              status: "completed",
+              model: relay.model,
+              output: [],
+            },
           },
         });
         return;
@@ -1049,18 +1109,18 @@ test("periodic update control discovers releases and waits for active requests",
   });
 
   const unauthenticated = await fetch(
-    `${server.baseUrl}/bridge/update/status?current_version=0.1.8`,
+    `${server.baseUrl}/bridge/update/status?current_version=0.1.9`,
   );
   assert.equal(unauthenticated.status, 401);
 
   const statusResponse = await extensionControlFetch(
     server,
     extension,
-    "/bridge/update/status?current_version=0.1.8",
+    "/bridge/update/status?current_version=0.1.9",
   );
   assert.equal(statusResponse.status, 200);
   const status = (await statusResponse.json()) as Record<string, unknown>;
-  assert.equal(status.current_version, "0.1.8");
+  assert.equal(status.current_version, "0.1.9");
   assert.equal(status.latest_version, "9.9.9");
   assert.equal(status.update_available, true);
   assert.equal(
@@ -1088,7 +1148,7 @@ test("periodic update control discovers releases and waits for active requests",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ current_version: "0.1.8" }),
+      body: JSON.stringify({ current_version: "0.1.9" }),
     },
   );
   assert.equal(busy.status, 409);
@@ -1108,7 +1168,7 @@ test("periodic update control discovers releases and waits for active requests",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ current_version: "0.1.8" }),
+      body: JSON.stringify({ current_version: "0.1.9" }),
     },
   );
   await waitFor(() => delayedCheckStarted, "delayed update check");
@@ -1142,13 +1202,13 @@ test("periodic update control discovers releases and waits for active requests",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ current_version: "0.1.8" }),
+      body: JSON.stringify({ current_version: "0.1.9" }),
     },
   );
   assert.equal(prepared.status, 202);
   assert.deepEqual(await prepared.json(), {
     accepted: true,
-    current_version: "0.1.8",
+    current_version: "0.1.9",
     latest_version: "9.9.9",
   });
   const whileRestarting = await apiFetch(server, "/v1/models");
@@ -1158,6 +1218,114 @@ test("periodic update control discovers releases and waits for active requests",
     "bridge_updating",
   );
   await waitFor(() => shutdownRequests === 1, "update shutdown handoff");
+});
+
+test("uses the legacy Responses adapter until the extension advertises native support", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-legacy-responses-test-"),
+  );
+  const server = await ValBridgeServer.create({
+    config: { port: 0, configDirectory, requestTimeoutMs: 2_000 },
+    quiet: true,
+  });
+  await server.listen();
+  const extension = new FakeValExtension(
+    server,
+    EXTENSION_ORIGIN,
+    EXTENSION_ID,
+    "val-test",
+    false,
+  );
+  await extension.pair();
+  await extension.connect();
+
+  t.after(async () => {
+    extension.close();
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  const client = new OpenAI({
+    apiKey: server.secrets.get().clientApiKey,
+    baseURL: `${server.baseUrl}/v1`,
+  });
+  const stored = await client.responses.create({
+    model: "val-test",
+    input: "LEGACY_STORE",
+    store: true,
+  });
+  const continued = await client.responses.create({
+    model: "val-test",
+    input: "CONTINUE",
+    previous_response_id: stored.id,
+  });
+
+  assert.equal(stored.output_text, "bridge-ok");
+  assert.equal(continued.output_text, "continued-ok");
+  assert.equal(extension.responsesRequests.length, 0);
+  assert.deepEqual(extension.relayRequests.at(-1)?.persistence, {
+    mode: "stored",
+    chatId: "val-chat-1",
+    appendToExisting: true,
+  });
+});
+
+test("native Responses can outlive the chat timeout and still cancel on disconnect", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-native-timeout-test-"),
+  );
+  const server = await ValBridgeServer.create({
+    config: {
+      port: 0,
+      configDirectory,
+      requestTimeoutMs: 40,
+      responseTimeoutMs: 0,
+    },
+    quiet: true,
+  });
+  await server.listen();
+  const extension = new FakeValExtension(server);
+  await extension.pair();
+  await extension.connect();
+
+  t.after(async () => {
+    extension.close();
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  const controller = new AbortController();
+  let settled = false;
+  const requestOutcome = apiFetch(server, "/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "val-test",
+      input: "HOLD_NATIVE",
+    }),
+    signal: controller.signal,
+  }).then(
+    (response) => ({ response }),
+    (error: unknown) => ({ error }),
+  );
+  void requestOutcome.then(() => {
+    settled = true;
+  });
+
+  await waitFor(
+    () => extension.heldRequestIds.length === 1,
+    "held native Responses request",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(settled, false);
+
+  controller.abort();
+  const result = await requestOutcome;
+  assert.ok("error" in result);
+  await waitFor(
+    () => extension.cancelledRequestIds.length === 1,
+    "native Responses cancellation",
+  );
 });
 
 test("companion contract works through the official OpenAI JavaScript SDK", async (t) => {
@@ -1324,6 +1492,14 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
     previous_response_id: storedResponse.id,
   });
   assert.equal(continuedResponse.status, "completed");
+  const continuationRequest = extension.responsesRequests.find((request) =>
+    JSON.stringify(request.body).includes("CONTINUE"),
+  );
+  assert.equal(
+    continuationRequest?.body.previous_response_id,
+    storedResponse.id,
+  );
+  assert.equal(continuationRequest?.body.store, true);
 
   const responseStream = await client.responses.create({
     model: "val-test",
@@ -1466,6 +1642,32 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   assert.equal(typeof streamedError?.sequence_number, "number");
   assert.equal(streamedError?.message, "Val rejected the streamed request.");
 
+  const incompleteResponse = await apiFetch(server, "/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "val-test",
+      input: "NATIVE_INCOMPLETE",
+      stream: true,
+    }),
+  });
+  assert.equal(incompleteResponse.status, 200);
+  const incompleteText = await incompleteResponse.text();
+  assert.match(incompleteText, /"code":"invalid_upstream_response"/);
+
+  const invalidEventResponse = await apiFetch(server, "/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "val-test",
+      input: "INVALID_NATIVE_EVENT",
+      stream: true,
+    }),
+  });
+  assert.equal(invalidEventResponse.status, 200);
+  const invalidEventText = await invalidEventResponse.text();
+  assert.match(invalidEventText, /"code":"invalid_bridge_event"/);
+
   const unsupported = await apiFetch(server, "/v1/embeddings", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1485,12 +1687,24 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
 
   const mappings = JSON.parse(
     await readFile(join(configDirectory, "response-mappings.json"), "utf8"),
-  ) as { mappings: Array<{ responseId: string; nativeResponseId: string }> };
+  ) as {
+    mappings: Array<{ responseId: string; nativeResponseId: string }>;
+  };
   assert.ok(
     mappings.mappings.some(
       (mapping) =>
         mapping.responseId === storedResponse.id &&
         typeof mapping.nativeResponseId === "string",
+    ),
+  );
+  assert.ok(
+    mappings.mappings.some(
+      (mapping) => mapping.responseId === continuedResponse.id,
+    ),
+  );
+  assert.ok(
+    !mappings.mappings.some(
+      (mapping) => mapping.responseId === reasonedResponse.id,
     ),
   );
   assert.ok(!JSON.stringify(mappings).includes("STORE_THIS"));
@@ -1642,6 +1856,21 @@ test("pairing rejects a claimed extension ID that does not match Origin", async 
   assert.equal(response.status, 400);
   assert.equal(
     ((await response.json()) as { error: { code: string } }).error.code,
+    "invalid_pairing_request",
+  );
+
+  const missingOrigin = await fetch(`${server.baseUrl}/bridge/pair`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      code: server.pairingCode,
+      extensionId: EXTENSION_ID,
+      protocolVersion: PROTOCOL_VERSION,
+    }),
+  });
+  assert.equal(missingOrigin.status, 400);
+  assert.equal(
+    ((await missingOrigin.json()) as { error: { code: string } }).error.code,
     "invalid_pairing_request",
   );
 });

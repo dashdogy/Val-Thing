@@ -17,6 +17,7 @@ type MappingFile = {
 export class MappingStore {
   private readonly path: string;
   private mappings = new Map<string, ResponseMapping>();
+  private writeQueue = Promise.resolve();
 
   private constructor(path: string) {
     this.path = path;
@@ -31,7 +32,12 @@ export class MappingStore {
         await readFile(store.path, "utf8"),
       ) as MappingFile;
       for (const mapping of file.mappings ?? []) {
-        if (mapping.responseId) {
+        if (
+          typeof mapping.responseId === "string" &&
+          ((typeof mapping.chatId === "string" && mapping.chatId) ||
+            (typeof mapping.nativeResponseId === "string" &&
+              mapping.nativeResponseId))
+        ) {
           store.mappings.set(mapping.responseId, mapping);
         }
       }
@@ -47,12 +53,24 @@ export class MappingStore {
     return this.mappings.get(responseId);
   }
 
-  async set(responseId: string, nativeResponseId: string) {
-    this.mappings.set(responseId, {
+  async setChat(responseId: string, chatId: string) {
+    await this.set({
+      responseId,
+      chatId,
+      createdAt: Math.floor(Date.now() / 1000),
+    });
+  }
+
+  async setNative(responseId: string, nativeResponseId: string) {
+    await this.set({
       responseId,
       nativeResponseId,
       createdAt: Math.floor(Date.now() / 1000),
     });
+  }
+
+  private async set(mapping: ResponseMapping) {
+    this.mappings.set(mapping.responseId, mapping);
 
     const retained = [...this.mappings.values()]
       .sort((left, right) => right.createdAt - left.createdAt)
@@ -62,6 +80,8 @@ export class MappingStore {
     );
 
     const file: MappingFile = { version: 1, mappings: retained };
-    await writeJsonAtomic(this.path, file);
+    const write = this.writeQueue.then(() => writeJsonAtomic(this.path, file));
+    this.writeQueue = write.catch(() => undefined);
+    await write;
   }
 }

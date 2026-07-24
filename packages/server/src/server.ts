@@ -12,6 +12,7 @@ import {
   PROTOCOL_VERSION,
   type PairRequest,
   type PairResponse,
+  type RelayDoneResult,
 } from "@val-bridge/protocol";
 import { WebSocketServer } from "ws";
 import { BridgeHub } from "./bridge-hub.js";
@@ -33,8 +34,12 @@ import {
   chatRequestToRelay,
   parseChatCompletion,
   parseResponse,
+  responseInputToMessages,
   titleFromMessages,
   type ChatCompletionRequest,
+  responseRequestToRelay,
+  responseToolsToChatTools,
+  type ResponseRequest,
 } from "./openai-schema.js";
 import {
   configureOpenCode,
@@ -47,6 +52,7 @@ import {
   type ReasoningDisclosure,
   usageTokenCounts,
 } from "./reasoning-state.js";
+import { ResponsesAdapter } from "./responses-adapter.js";
 import { Semaphore } from "./semaphore.js";
 import { UpdateChecker } from "./update-checker.js";
 
@@ -136,6 +142,14 @@ function writeSseEvent(
   eventType: string,
   data: unknown,
 ) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(eventType)) {
+    throw new OpenAIHttpError(
+      502,
+      "invalid_bridge_event",
+      "The extension returned an invalid Responses event type.",
+      "api_connection_error",
+    );
+  }
   response.write(`event: ${eventType}\n`);
   response.write(`data: ${JSON.stringify(data)}\n\n`);
 }
@@ -488,8 +502,8 @@ export class ValBridgeServer {
       typeof body.code !== "string" ||
       typeof body.extensionId !== "string" ||
       body.protocolVersion !== PROTOCOL_VERSION ||
-      (originExtensionId != null &&
-        body.extensionId !== originExtensionId)
+      !originExtensionId ||
+      body.extensionId !== originExtensionId
     ) {
       throw new OpenAIHttpError(
         400,
@@ -865,6 +879,12 @@ export class ValBridgeServer {
     let body: ReturnType<typeof parseResponse> | undefined;
     let outcome: "completed" | "failed" | "cancelled" = "failed";
     let errorCode: string | undefined;
+    let handledLegacy = false;
+    let terminalEvent:
+      | "response.completed"
+      | "response.failed"
+      | "response.incomplete"
+      | undefined;
     response.on("close", () => {
       if (!response.writableEnded) controller.abort();
     });
@@ -885,45 +905,48 @@ export class ValBridgeServer {
           "previous_response_id",
         );
       }
+      if (prior?.nativeResponseId && !this.hub.supportsNativeResponses()) {
+        throw new OpenAIHttpError(
+          503,
+          "native_responses_unavailable",
+          "Reload the updated extension before continuing this response.",
+          "api_connection_error",
+        );
+      }
+      if (prior?.chatId && !prior.nativeResponseId) {
+        handledLegacy = true;
+        await this.handleLegacyResponse(
+          body,
+          prior.chatId,
+          response,
+          headers,
+          controller,
+          startedAt,
+        );
+        return;
+      }
+      if (!prior && !this.hub.supportsNativeResponses()) {
+        handledLegacy = true;
+        await this.handleLegacyResponse(
+          body,
+          undefined,
+          response,
+          headers,
+          controller,
+          startedAt,
+        );
+        return;
+      }
 
       bridgeResponseId = `resp_${randomUUID().replaceAll("-", "")}`;
-      const relayBody: Record<string, unknown> = {
-        model: body.model,
-        input: body.input,
-        stream: body.stream,
-        ...(typeof body.instructions === "string"
-          ? { instructions: body.instructions }
-          : {}),
-        ...(body.include !== undefined ? { include: body.include } : {}),
-        ...(body.tools !== undefined ? { tools: body.tools } : {}),
-        ...(body.tool_choice !== undefined
-          ? { tool_choice: body.tool_choice }
-          : {}),
-        ...(body.text !== undefined ? { text: body.text } : {}),
-        ...(body.temperature !== undefined
-          ? { temperature: body.temperature }
-          : {}),
-        ...(body.top_p !== undefined ? { top_p: body.top_p } : {}),
-        ...(body.max_output_tokens !== undefined
-          ? { max_output_tokens: body.max_output_tokens }
-          : {}),
-        ...(body.parallel_tool_calls !== undefined
-          ? { parallel_tool_calls: body.parallel_tool_calls }
-          : {}),
-        ...(body.reasoning !== undefined
-          ? { reasoning: body.reasoning }
-          : {}),
-        ...(body.truncation !== undefined
-          ? { truncation: body.truncation }
-          : {}),
-        ...(body.metadata !== undefined
-          ? { metadata: body.metadata }
-          : {}),
-        ...(body.store !== undefined ? { store: body.store } : {}),
-        ...(prior?.nativeResponseId
-          ? { previous_response_id: prior.nativeResponseId }
-          : {}),
-      };
+      responseInputToMessages(body);
+      responseToolsToChatTools(body.tools);
+      const relayBody = { ...body } as Record<string, unknown>;
+      delete relayBody.previous_response_id;
+      relayBody.store = body.store || Boolean(prior?.nativeResponseId);
+      if (prior?.nativeResponseId) {
+        relayBody.previous_response_id = prior.nativeResponseId;
+      }
 
       const relayRequest = {
         kind: "responses" as const,
@@ -959,7 +982,12 @@ export class ValBridgeServer {
                   Math.floor(sequenceNumber) + 1,
                 );
               }
-              if (event.eventType === "response.completed") {
+              if (
+                event.eventType === "response.completed" ||
+                event.eventType === "response.failed" ||
+                event.eventType === "response.incomplete"
+              ) {
+                terminalEvent = event.eventType;
                 const eventPayload = event.data as Record<string, unknown>;
                 completedPayload =
                   eventPayload.response &&
@@ -971,6 +999,18 @@ export class ValBridgeServer {
                   typeof completedPayload.id === "string"
                     ? completedPayload.id
                     : undefined;
+                if (event.eventType !== "response.completed") {
+                  const nativeError =
+                    completedPayload.error &&
+                    typeof completedPayload.error === "object" &&
+                    !Array.isArray(completedPayload.error)
+                      ? (completedPayload.error as Record<string, unknown>)
+                      : undefined;
+                  errorCode =
+                    typeof nativeError?.code === "string"
+                      ? nativeError.code
+                      : event.eventType.replace("response.", "response_");
+                }
               }
               if (body!.stream) {
                 startSse();
@@ -979,14 +1019,40 @@ export class ValBridgeServer {
             },
           },
           controller.signal,
-          this.config.responseTimeoutMs || undefined,
+          this.config.responseTimeoutMs,
         );
-        outcome = "completed";
+        if (!terminalEvent || !completedPayload) {
+          throw new OpenAIHttpError(
+            502,
+            "invalid_upstream_response",
+            "Val ended the Responses relay without a terminal response.",
+            "api_connection_error",
+          );
+        }
+        if (
+          terminalEvent === "response.completed" &&
+          (body.store || prior?.nativeResponseId) &&
+          !mappedNativeId
+        ) {
+          throw new OpenAIHttpError(
+            502,
+            "invalid_upstream_response",
+            "Val returned a stored response without an ID.",
+            "api_connection_error",
+          );
+        }
+        outcome =
+          terminalEvent === "response.completed" ? "completed" : "failed";
       } catch (rawError) {
         const err = asOpenAIHttpError(rawError);
         outcome = controller.signal.aborted ? "cancelled" : "failed";
         errorCode = err.code;
-        if (body.stream && response.headersSent && !response.writableEnded) {
+        if (
+          body.stream &&
+          response.headersSent &&
+          !response.writableEnded &&
+          !response.destroyed
+        ) {
           writeSseEvent(response, "error", {
             type: "error",
             sequence_number: nextSequenceNumber,
@@ -998,42 +1064,40 @@ export class ValBridgeServer {
           response.end();
           return;
         }
-        throw rawError;
+        throw err;
       }
 
-      if (mappedNativeId) {
-        const clientVisibleId =
-          typeof completedPayload?.id === "string"
-            ? completedPayload.id
-            : bridgeResponseId;
-        await this.mappings.set(clientVisibleId, mappedNativeId);
+      if (
+        terminalEvent === "response.completed" &&
+        mappedNativeId &&
+        (body.store || prior?.nativeResponseId)
+      ) {
+        await this.mappings.setNative(mappedNativeId, mappedNativeId);
       }
 
       if (body.stream) {
         response.write("data: [DONE]\n\n");
         response.end();
       } else {
-        json(response, 200, completedPayload ?? {}, headers);
+        const disclosure = this.nativeReasoningDisclosure(
+          body,
+          completedPayload,
+        );
+        json(response, 200, completedPayload, {
+          ...headers,
+          ...reasoningHeaders(disclosure),
+        });
       }
+    } catch (rawError) {
+      const error = asOpenAIHttpError(rawError);
+      outcome = controller.signal.aborted ? "cancelled" : "failed";
+      errorCode = error.code;
+      throw rawError;
     } finally {
-      if (body) {
+      if (body && !handledLegacy) {
         const output = Array.isArray(completedPayload?.output)
           ? completedPayload.output
           : [];
-        const summaryAvailable = output.some((rawItem) => {
-          if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
-            return false;
-          }
-          const item = rawItem as Record<string, unknown>;
-          return item.type === "reasoning" && Array.isArray(item.summary) &&
-            item.summary.some((rawPart) => {
-              if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) {
-                return false;
-              }
-              const text = (rawPart as Record<string, unknown>).text;
-              return typeof text === "string" && text.trim().length > 0;
-            });
-        });
         const usage = completedPayload?.usage;
         this.diagnostics.recordGeneration({
           endpoint: "responses",
@@ -1043,23 +1107,217 @@ export class ValBridgeServer {
           outcome,
           durationMs: Date.now() - startedAt,
           usage: usageTokenCounts(usage),
-          reasoning: reasoningDisclosure(
-            usage,
-            summaryAvailable ? "available" : "",
-            reasoningSettingsFromResponse(body.reasoning),
-          ),
+          reasoning: this.nativeReasoningDisclosure(body, completedPayload),
           toolCalls: output.filter((rawItem) =>
             Boolean(
               rawItem &&
               typeof rawItem === "object" &&
               !Array.isArray(rawItem) &&
               (rawItem as Record<string, unknown>).type === "function_call",
-            )
+            ),
           ).length,
           ...(errorCode ? { errorCode } : {}),
         });
       }
       release();
     }
+  }
+
+  private async handleLegacyResponse(
+    body: ResponseRequest,
+    legacyChatId: string | undefined,
+    response: ServerResponse,
+    headers: Record<string, string>,
+    controller: AbortController,
+    startedAt: number,
+  ) {
+    const accumulator = new ChatAccumulator(body.model);
+    const adapter = new ResponsesAdapter(body, accumulator);
+    let outcome: "completed" | "failed" | "cancelled" = "failed";
+    let errorCode: string | undefined;
+    let sseStarted = false;
+    let initialEventsSent = false;
+    let acceptedChatId: string | undefined;
+
+    const startSse = () => {
+      if (sseStarted || !body.stream) return;
+      sseStarted = true;
+      response.writeHead(200, {
+        ...headers,
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache, no-store",
+        "x-content-type-options": "nosniff",
+        connection: "keep-alive",
+        ...(acceptedChatId || legacyChatId
+          ? { "x-val-chat-id": acceptedChatId ?? legacyChatId }
+          : {}),
+      });
+    };
+    const writeInitialEvents = () => {
+      if (!body.stream || initialEventsSent) return;
+      initialEventsSent = true;
+      startSse();
+      for (const event of adapter.initialEvents()) {
+        writeSseEvent(response, String(event.type), event);
+      }
+    };
+
+    try {
+      let result: RelayDoneResult;
+      try {
+        result = await this.hub.execute(
+          responseRequestToRelay(
+            body,
+            legacyChatId
+              ? {
+                  mode: "stored",
+                  chatId: legacyChatId,
+                  appendToExisting: true,
+                }
+              : body.store
+                ? {
+                    mode: "stored",
+                    title: titleFromMessages(
+                      responseRequestToRelay(body, {
+                        mode: "temporary",
+                      }).messages,
+                    ),
+                  }
+                : { mode: "temporary" },
+          ),
+          {
+            onAccepted: (accepted) => {
+              acceptedChatId = accepted.chatId;
+              if (accepted.chatId) {
+                body.metadata = {
+                  ...(body.metadata ?? {}),
+                  val_chat_id: accepted.chatId,
+                };
+              }
+              writeInitialEvents();
+            },
+            onEvent: (event) => {
+              const chunks = accumulator.consume(event);
+              if (!body.stream) return;
+              writeInitialEvents();
+              for (const chunk of chunks) {
+                for (const responseEvent of adapter.eventsFromChunk(chunk)) {
+                  writeSseEvent(
+                    response,
+                    String(responseEvent.type),
+                    responseEvent,
+                  );
+                }
+              }
+            },
+          },
+          controller.signal,
+        );
+      } catch (rawError) {
+        const error = asOpenAIHttpError(rawError);
+        outcome = controller.signal.aborted ? "cancelled" : "failed";
+        errorCode = error.code;
+        if (
+          body.stream &&
+          response.headersSent &&
+          !response.writableEnded &&
+          !response.destroyed
+        ) {
+          for (const event of adapter.errorEvents(error)) {
+            writeSseEvent(response, String(event.type), event);
+          }
+          response.write("data: [DONE]\n\n");
+          response.end();
+          return;
+        }
+        throw error;
+      }
+
+      const chatId = result.chatId ?? acceptedChatId ?? legacyChatId;
+      if (chatId) {
+        body.metadata = {
+          ...(body.metadata ?? {}),
+          val_chat_id: chatId,
+        };
+      }
+      if ((body.store || legacyChatId) && chatId) {
+        await this.mappings.setChat(adapter.id, chatId);
+      }
+
+      if (body.stream) {
+        writeInitialEvents();
+        for (const event of adapter.finalEvents()) {
+          writeSseEvent(response, String(event.type), event);
+        }
+        response.write("data: [DONE]\n\n");
+        response.end();
+      } else {
+        const disclosure = reasoningDisclosure(
+          accumulator.usage,
+          accumulator.reasoning,
+          reasoningSettingsFromResponse(body.reasoning),
+        );
+        json(response, 200, adapter.responseObject("completed"), {
+          ...headers,
+          ...reasoningHeaders(disclosure),
+          ...(chatId ? { "x-val-chat-id": chatId } : {}),
+        });
+      }
+      outcome = "completed";
+    } catch (rawError) {
+      const error = asOpenAIHttpError(rawError);
+      outcome = controller.signal.aborted ? "cancelled" : "failed";
+      errorCode = error.code;
+      throw rawError;
+    } finally {
+      const disclosure = reasoningDisclosure(
+        accumulator.usage,
+        accumulator.reasoning,
+        reasoningSettingsFromResponse(body.reasoning),
+      );
+      this.diagnostics.recordGeneration({
+        endpoint: "responses",
+        requestId: accumulator.id,
+        model: body.model,
+        stream: body.stream,
+        outcome,
+        durationMs: Date.now() - startedAt,
+        usage: usageTokenCounts(accumulator.usage),
+        reasoning: disclosure,
+        toolCalls: accumulator.toolCalls.length,
+        finishReason: accumulator.finishReason,
+        ...(errorCode ? { errorCode } : {}),
+      });
+    }
+  }
+
+  private nativeReasoningDisclosure(
+    body: ResponseRequest,
+    completedPayload: Record<string, unknown> | undefined,
+  ) {
+    const output = Array.isArray(completedPayload?.output)
+      ? completedPayload.output
+      : [];
+    const summaryAvailable = output.some((rawItem) => {
+      if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+        return false;
+      }
+      const item = rawItem as Record<string, unknown>;
+      if (item.type !== "reasoning" || !Array.isArray(item.summary)) {
+        return false;
+      }
+      return item.summary.some((rawPart) => {
+        if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) {
+          return false;
+        }
+        const text = (rawPart as Record<string, unknown>).text;
+        return typeof text === "string" && text.trim().length > 0;
+      });
+    });
+    return reasoningDisclosure(
+      completedPayload?.usage,
+      summaryAvailable ? "available" : "",
+      reasoningSettingsFromResponse(body.reasoning),
+    );
   }
 }

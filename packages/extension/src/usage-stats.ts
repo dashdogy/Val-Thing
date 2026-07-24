@@ -91,7 +91,8 @@ export function responseUsageDetails(value: unknown) {
   const output = Array.isArray(response?.output) ? response.output : [];
   const reasoningSummaryAvailable = output.some((rawItem) => {
     const item = record(rawItem);
-    if (item?.type !== "reasoning" || !Array.isArray(item.summary)) return false;
+    if (item?.type !== "reasoning" || !Array.isArray(item.summary))
+      return false;
     return item.summary.some((rawPart) => {
       const part = record(rawPart);
       return typeof part?.text === "string" && part.text.trim().length > 0;
