@@ -71,6 +71,9 @@ async function bundle(entryPoint, outputFile, options = {}) {
     minify: true,
     sourcemap: false,
     legalComments: "none",
+    alias: {
+      "jsonc-parser": "jsonc-parser/lib/esm/main.js",
+    },
     banner: {
       js: `${options.executable ? "#!/usr/bin/env node\n" : ""}import { createRequire as __createRequire } from "node:module"; const require = __createRequire(import.meta.url);`,
     },

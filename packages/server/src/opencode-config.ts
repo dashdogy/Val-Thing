@@ -18,7 +18,7 @@ import {
   parse,
   type FormattingOptions,
   type ParseError,
-} from "jsonc-parser/lib/esm/main.js";
+} from "jsonc-parser";
 
 const PROVIDER_ID = "val";
 const REASONING_LEVELS = [
@@ -162,14 +162,11 @@ function modelFamily(model: ValModel) {
 }
 
 function reasoningVariant(level: (typeof REASONING_LEVELS)[number]) {
-  if (level === "max") {
-    return {
-      reasoningEffort: "max",
-      reasoningSummary: "auto",
-      include: ["reasoning.encrypted_content"],
-    };
-  }
-  return { reasoningEffort: level };
+  return {
+    reasoningEffort: level,
+    reasoningSummary: "auto",
+    ...(level === "max" ? { include: ["reasoning.encrypted_content"] } : {}),
+  };
 }
 
 export function openCodeModel(model: ValModel) {

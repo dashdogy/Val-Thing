@@ -92,6 +92,18 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
         string,
         Record<string, unknown>
       >
+    ).high,
+    {
+      reasoningEffort: "high",
+      reasoningSummary: "auto",
+    },
+  );
+  assert.deepEqual(
+    (
+      models["openai-gpt-5.6-luna"]?.variants as Record<
+        string,
+        Record<string, unknown>
+      >
     ).max,
     {
       reasoningEffort: "max",

@@ -419,12 +419,15 @@ export function responseRequestToRelay(
   } else if (
     body.reasoning &&
     typeof body.reasoning === "object" &&
-    !Array.isArray(body.reasoning) &&
-    typeof (body.reasoning as Record<string, unknown>).effort === "string"
+    !Array.isArray(body.reasoning)
   ) {
-    parameters.reasoning_effort = String(
-      (body.reasoning as Record<string, unknown>).effort,
-    );
+    const reasoning = body.reasoning as Record<string, unknown>;
+    if (typeof reasoning.effort === "string") {
+      parameters.reasoning_effort = reasoning.effort;
+    }
+    if (typeof reasoning.summary === "string") {
+      parameters.reasoning_summary = reasoning.summary;
+    }
   }
   if (body.truncation !== undefined)
     parameters.truncation = body.truncation as JsonValue;

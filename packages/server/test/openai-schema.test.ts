@@ -150,7 +150,7 @@ test("translates Responses instructions, messages, calls, and call outputs", () 
       },
     },
     max_output_tokens: 120,
-    reasoning: { effort: "high" },
+    reasoning: { effort: "high", summary: "detailed" },
   });
 
   const relay = responseRequestToRelay(body, {
@@ -170,6 +170,7 @@ test("translates Responses instructions, messages, calls, and call outputs", () 
   assert.equal(relay.tools?.[0]?.function.name, "room_lookup");
   assert.equal(relay.parameters?.max_completion_tokens, 120);
   assert.equal(relay.parameters?.reasoning_effort, "high");
+  assert.equal(relay.parameters?.reasoning_summary, "detailed");
   assert.equal(relay.persistence.mode, "stored");
 });
 
@@ -185,6 +186,20 @@ test("maps string Responses reasoning directly to Val reasoning effort", () => {
 
   assert.equal(relay.parameters?.reasoning_effort, "low");
   assert.equal("reasoning" in (relay.parameters ?? {}), false);
+});
+
+test("maps a Responses reasoning summary without requiring an effort", () => {
+  const relay = responseRequestToRelay(
+    parseResponse({
+      model: "val-model",
+      input: "Summarise your reasoning.",
+      reasoning: { summary: "auto" },
+    }),
+    { mode: "temporary" },
+  );
+
+  assert.equal(relay.parameters?.reasoning_summary, "auto");
+  assert.equal("reasoning_effort" in (relay.parameters ?? {}), false);
 });
 
 test("groups parallel Responses function calls before their tool outputs", () => {

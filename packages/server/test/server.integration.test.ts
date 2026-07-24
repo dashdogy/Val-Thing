@@ -775,6 +775,14 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
     input: "REASONING_SUMMARY",
     reasoning: { effort: "high", summary: "detailed" },
   });
+  assert.equal(
+    extension.relayRequests.at(-1)?.parameters?.reasoning_effort,
+    "high",
+  );
+  assert.equal(
+    extension.relayRequests.at(-1)?.parameters?.reasoning_summary,
+    "detailed",
+  );
   const reasonedOutput = reasonedResponse.output as Array<{
     type: string;
     summary?: Array<{ type: string; text: string }>;
