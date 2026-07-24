@@ -1,4 +1,5 @@
 export const PROTOCOL_VERSION = 2;
+export const COMPANION_LAUNCH_URL = "val-openai-bridge://launch";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];

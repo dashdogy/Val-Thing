@@ -20,7 +20,7 @@ release/val-openai-local-bridge-<version>.zip
 release/val-openai-local-bridge-extension-<version>.zip
 ```
 
-The portable ZIP contains the bundled companion, updater, launcher, and unpacked extension. Both installer forms select a conventional per-user directory on Windows, macOS, or Linux and verify the release before extraction. `install.tgz` is a minimal npm package for the one-line install command.
+The portable ZIP contains the bundled companion, updater, launcher, and unpacked extension. Both installer forms select a conventional per-user directory on Windows, macOS, or Linux, verify the release before extraction, and register the per-user `val-openai-bridge://launch` handler used by the extension popup. `install.tgz` is a minimal npm package for the one-line install command.
 
 ## Verify the package
 
@@ -56,4 +56,4 @@ npx --yes https://github.com/dashdogy/Val-Thing/releases/latest/download/install
 
 The attached `install.mjs` remains available for offline or manual handoff.
 
-The generated launchers check the latest GitHub release on startup, retain a working installed version when the update check is offline, and never copy local bridge credentials into release metadata.
+The extension's **Launch companion** button opens the registered operating-system handler. The generated launcher then checks the latest GitHub release before every startup, retains a working installed version when the update check is offline, and never copies local bridge credentials into release metadata.

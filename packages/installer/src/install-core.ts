@@ -23,6 +23,7 @@ import {
   SOURCE_REPOSITORY,
 } from "./release.js";
 import { defaultInstallRoot, isPathInside, runtimePaths } from "./paths.js";
+import { registerCompanionLaunchProtocol } from "./protocol-handler.js";
 import { extractZip } from "./zip.js";
 
 type Logger = Pick<Console, "log" | "warn">;
@@ -277,6 +278,7 @@ async function installVersion(
   payloadRoot: string,
   release: ResolvedRelease,
   installRoot: string,
+  logger: Logger,
 ) {
   const paths = runtimePaths(installRoot);
   await mkdir(paths.versions, { recursive: true });
@@ -380,6 +382,21 @@ exec node "$SCRIPT_DIR/update.mjs" "$@"
     source: release.source,
   };
   await writeAtomic(paths.current, `${JSON.stringify(current, null, 2)}\n`);
+  if (process.env.VAL_BRIDGE_SKIP_PROTOCOL_REGISTRATION !== "1") {
+    try {
+      await registerCompanionLaunchProtocol({
+        installRoot: paths.root,
+        startPath: paths.start,
+        logger,
+      });
+    } catch (error) {
+      logger.warn(
+        `Could not register the extension launch button: ${
+          error instanceof Error ? error.message : String(error)
+        }. The generated start command still works.`,
+      );
+    }
+  }
   await writeFile(paths.reloadMarker, "reload\n", "utf8");
 }
 
@@ -424,7 +441,7 @@ export async function installLatest(
     const payloadRoot = join(temporaryRoot, "payload");
     await extractZip(archive, payloadRoot);
     await validatePayload(payloadRoot, release);
-    await installVersion(payloadRoot, release, installRoot);
+    await installVersion(payloadRoot, release, installRoot, logger);
     const installed = await readInstalledState(installRoot);
     if (!installed) {
       throw new Error("The installed runtime failed validation.");

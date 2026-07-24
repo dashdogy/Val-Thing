@@ -11,6 +11,9 @@ history.
 - [ ] Pair with the companion's current six-digit code.
 - [ ] Open signed-in Val once.
 - [ ] The popup shows **Connected**, **Signed in**, and **Ready**.
+- [ ] Stop the companion, press **Launch companion**, approve the browser's external-app prompt if shown, and confirm the installed launcher opens.
+- [ ] The launcher checks for a GitHub release update before the companion starts; an offline update failure still starts the installed version.
+- [ ] Once connected, the popup changes the launch button to **Companion running**.
 - [ ] The client API key is masked by default; **Show** reveals it and **Copy** matches the companion configuration.
 - [ ] **Configure OpenCode** preserves unrelated providers and settings, exports only OpenAI GPT-5.6 models, and creates a backup before changing an existing config.
 - [ ] Each configured GPT-5.6 model reports a 1,050,000-token context limit and 128,000-token output limit.

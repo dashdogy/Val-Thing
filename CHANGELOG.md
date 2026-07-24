@@ -2,6 +2,16 @@
 
 All notable changes to Val OpenAI Local Bridge are documented here.
 
+## 0.1.2 - 2026-07-24
+
+- Added a popup button that launches the installed companion through a
+  per-user OS protocol handler.
+- Registered the launch handler on Windows, macOS, and Linux without adding a
+  Chrome permission.
+- Made the installed launcher visibly check GitHub Releases for an update
+  before every companion startup, with offline fallback to the installed
+  version.
+
 ## 0.1.1 - 2026-07-24
 
 - Changed the companion's default bind address to `0.0.0.0`, allowing

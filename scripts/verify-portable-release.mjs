@@ -180,7 +180,11 @@ try {
     projectRoot,
     oneLineInstallerPath,
   ).replaceAll("\\", "/")}`;
+  const protocolSafeEnvironment = {
+    VAL_BRIDGE_SKIP_PROTOCOL_REGISTRATION: "1",
+  };
   const npmEnvironment = {
+    ...protocolSafeEnvironment,
     npm_config_audit: "false",
     npm_config_cache: join(temporaryRoot, "npm-cache"),
     npm_config_fund: "false",
@@ -204,13 +208,10 @@ try {
     /Installed Val Bridge/,
     `npx installer output:\n${first.stdout}\n${first.stderr}`,
   );
-  const second = await runNode([
-    installerPath,
-    "--install-dir",
-    installRoot,
-    "--release-api",
-    releaseApi,
-  ]);
+  const second = await runNode(
+    [installerPath, "--install-dir", installRoot, "--release-api", releaseApi],
+    protocolSafeEnvironment,
+  );
   assert.match(second.stdout, /already installed/);
 
   await Promise.all([
@@ -221,13 +222,16 @@ try {
     access(join(installRoot, "reload-extension")),
   ]);
 
-  const update = await runNode([
-    join(installRoot, "runtime", "update.mjs"),
-    "--install-dir",
-    installRoot,
-    "--release-api",
-    releaseApi,
-  ]);
+  const update = await runNode(
+    [
+      join(installRoot, "runtime", "update.mjs"),
+      "--install-dir",
+      installRoot,
+      "--release-api",
+      releaseApi,
+    ],
+    protocolSafeEnvironment,
+  );
   assert.match(update.stdout, /already installed/);
 
   const port = await unusedPort();
@@ -244,6 +248,7 @@ try {
       cwd: installRoot,
       env: {
         ...process.env,
+        ...protocolSafeEnvironment,
         VAL_BRIDGE_PORT: String(port),
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -279,6 +284,7 @@ try {
       `installed launcher failed to start: ${launcherOutput}\n${launcherError}`,
     );
     assert.equal(health.status, "degraded");
+    assert.match(launcherOutput, /Checking for Val Bridge updates/);
     assert.match(launcherError, /Update check failed/);
   } finally {
     const alreadyExited =

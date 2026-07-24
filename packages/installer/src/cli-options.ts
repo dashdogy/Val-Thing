@@ -1,8 +1,10 @@
 import { resolve } from "node:path";
+import { COMPANION_LAUNCH_URL } from "@val-bridge/protocol";
 
 export type CliOptions = {
   installRoot?: string;
   apiUrl?: string;
+  launchUrl?: typeof COMPANION_LAUNCH_URL;
   help: boolean;
 };
 
@@ -25,6 +27,16 @@ export function parseCliOptions(arguments_: string[]) {
       const value = arguments_[index + 1];
       if (!value) throw new Error("--release-api requires a URL.");
       options.apiUrl = value;
+      index += 1;
+      continue;
+    }
+    if (argument === "--launch-url") {
+      const value = arguments_[index + 1];
+      if (!value) throw new Error("--launch-url requires a URL.");
+      if (value !== COMPANION_LAUNCH_URL) {
+        throw new Error("The companion launch URL is invalid.");
+      }
+      options.launchUrl = value;
       index += 1;
       continue;
     }

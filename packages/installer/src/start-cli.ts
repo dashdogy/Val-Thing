@@ -47,6 +47,7 @@ async function main() {
 
   const installRoot = options.installRoot ?? defaultInstallRoot();
   let installed;
+  console.log("Checking for Val Bridge updates...");
   try {
     installed = await installLatest(installOptionsFromCli(options));
   } catch (error) {

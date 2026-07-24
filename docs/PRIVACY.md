@@ -22,7 +22,11 @@ The extension communicates only with:
 - `https://val.rmit.edu.au`, as necessary to provide its single purpose; and
 - the Node companion through IPv4 loopback (`http://127.0.0.1`).
 
+When the user presses **Launch companion**, the extension opens the fixed `val-openai-bridge://launch` operating-system protocol URL. The URL contains no user data, credentials, prompts, model names, or identifiers. The per-user handler installed with the companion starts the local launcher.
+
 The companion listens on all IPv4 interfaces (`0.0.0.0`) by default, so its HTTP API can be reached by devices that can connect to the host's port. `/v1/*` requests require the locally generated client API key, browser CORS remains restricted to explicitly configured origins, and the RMIT bearer token remains inside the extension. The API uses unencrypted HTTP; users should keep the API key private and restrict access with a trusted network, host firewall, or private VPN. Prompts and responses cross the local network when a remote client uses the API. RMIT's own terms and privacy practices apply to information processed by Val.
+
+The installed launcher checks the project's GitHub Releases metadata whenever it starts the companion and may download a newer checksum-verified release. This update request does not include the RMIT token, bridge secrets, API key, prompts, responses, or Val identity data. If the check fails, the installed version starts instead.
 
 ## Storage and retention
 

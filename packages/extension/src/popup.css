@@ -116,6 +116,28 @@ header p {
   box-shadow: 0 0 0 3px rgba(210, 91, 83, 0.14);
 }
 
+.companion-launch {
+  padding-top: 12px;
+  border-top: 1px solid rgba(67, 97, 88, 0.12);
+}
+
+.companion-launch button {
+  width: 100%;
+  min-height: 34px;
+}
+
+.companion-launch button.running:disabled {
+  cursor: default;
+}
+
+.companion-launch p {
+  margin: 6px 1px 0;
+  color: #6f7f7a;
+  font-size: 9px;
+  line-height: 1.35;
+  text-align: center;
+}
+
 .usage-card {
   margin-top: 14px;
   padding: 14px 15px 13px;
@@ -470,6 +492,14 @@ footer {
   .status-card {
     border-color: #2b3734;
     background: rgba(25, 34, 32, 0.88);
+  }
+
+  .companion-launch {
+    border-top-color: rgba(154, 207, 190, 0.14);
+  }
+
+  .companion-launch p {
+    color: #93aaa3;
   }
 
   .usage-card {

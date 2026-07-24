@@ -1,3 +1,5 @@
+import { COMPANION_LAUNCH_URL } from "@val-bridge/protocol";
+
 type PopupStatus = {
   bridgeConnected: boolean;
   bridgePaired: boolean;
@@ -34,6 +36,8 @@ const sessionDot = element<HTMLSpanElement>("#session-dot");
 const sessionStatus = element<HTMLSpanElement>("#session-status");
 const socketDot = element<HTMLSpanElement>("#socket-dot");
 const socketStatus = element<HTMLSpanElement>("#socket-status");
+const launchCompanionButton = element<HTMLButtonElement>("#launch-companion");
+const launchCompanionStatus = element<HTMLElement>("#launch-companion-status");
 const pairingPanel = element<HTMLFormElement>("#pairing-panel");
 const endpointPanel = element<HTMLElement>("#endpoint-panel");
 const apiBase = element<HTMLElement>("#api-base");
@@ -66,6 +70,8 @@ let currentApiKey = "";
 let apiKeyVisible = false;
 let copyResetTimer: ReturnType<typeof setTimeout> | undefined;
 let configurePending = false;
+let launchPending = false;
+let launchResetTimer: ReturnType<typeof setTimeout> | undefined;
 
 function dot(element: HTMLElement, state: boolean | null) {
   element.classList.toggle("good", state === true);
@@ -189,6 +195,20 @@ async function refresh() {
       : status.bridgePaired
         ? "Offline"
         : "Not paired";
+    if (status.bridgeConnected) {
+      launchPending = false;
+      if (launchResetTimer) {
+        clearTimeout(launchResetTimer);
+        launchResetTimer = undefined;
+      }
+      launchCompanionButton.textContent = "Companion running";
+      launchCompanionStatus.textContent = "Connected";
+    } else if (!launchPending) {
+      launchCompanionButton.textContent = "Launch companion";
+      launchCompanionStatus.textContent = "Checks for updates before starting";
+    }
+    launchCompanionButton.disabled = status.bridgeConnected || launchPending;
+    launchCompanionButton.classList.toggle("running", status.bridgeConnected);
 
     dot(sessionDot, status.valSession);
     sessionStatus.textContent = status.valSession ? "Signed in" : "Open Val";
@@ -229,6 +249,35 @@ urlInput.addEventListener("input", () => {
 
 codeInput.addEventListener("input", () => {
   codeInput.value = codeInput.value.replace(/\D/g, "").slice(0, 6);
+});
+
+launchCompanionButton.addEventListener("click", async () => {
+  launchPending = true;
+  launchCompanionButton.disabled = true;
+  launchCompanionButton.textContent = "Launching…";
+  launchCompanionStatus.textContent = "Opening the installed launcher…";
+  showError();
+  try {
+    await chrome.tabs.create({
+      url: COMPANION_LAUNCH_URL,
+      active: true,
+    });
+    launchCompanionStatus.textContent =
+      "Update check requested; waiting for companion…";
+    if (launchResetTimer) clearTimeout(launchResetTimer);
+    launchResetTimer = setTimeout(() => {
+      launchPending = false;
+      launchResetTimer = undefined;
+      void refresh();
+    }, 15_000);
+  } catch (error) {
+    launchPending = false;
+    launchCompanionButton.textContent = "Launch companion";
+    launchCompanionStatus.textContent =
+      "Launcher unavailable; rerun the latest installer";
+    showError(`Could not open the companion launcher: ${errorMessage(error)}`);
+    await refresh();
+  }
 });
 
 toggleApiKeyButton.addEventListener("click", () => {
