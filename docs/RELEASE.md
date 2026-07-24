@@ -57,3 +57,7 @@ npx --yes https://github.com/dashdogy/Val-Thing/releases/latest/download/install
 The attached `install.mjs` remains available for offline or manual handoff.
 
 The extension's **Launch companion** button opens the registered operating-system handler. The generated launcher then checks the latest GitHub release before every startup, retains a working installed version when the update check is offline, and never copies local bridge credentials into release metadata.
+
+Running the installer again is safe and repairs the per-user launch handler,
+including an existing macOS installation, even when the current companion
+version is already installed.

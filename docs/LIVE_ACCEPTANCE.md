@@ -12,6 +12,7 @@ history.
 - [ ] Open signed-in Val once.
 - [ ] The popup shows **Connected**, **Signed in**, and **Ready**.
 - [ ] Stop the companion, press **Launch companion**, approve the browser's external-app prompt if shown, and confirm the installed launcher opens.
+- [ ] On macOS, the launch opens Terminal and runs the companion without adding an extension error; repeating the installer repairs an existing URL handler.
 - [ ] The launcher checks for a GitHub release update before the companion starts; an offline update failure still starts the installed version.
 - [ ] Once connected, the popup changes the launch button to **Companion running**.
 - [ ] The client API key is masked by default; **Show** reveals it and **Copy** matches the companion configuration.

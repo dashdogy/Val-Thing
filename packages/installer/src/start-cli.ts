@@ -5,7 +5,11 @@ import {
   installOptionsFromCli,
   parseCliOptions,
 } from "./cli-options.js";
-import { installLatest, readInstalledState } from "./install-core.js";
+import {
+  installLatest,
+  readInstalledState,
+  repairCompanionLaunchProtocol,
+} from "./install-core.js";
 import { defaultInstallRoot } from "./paths.js";
 
 const help = `Val Bridge launcher
@@ -39,13 +43,17 @@ async function main() {
     console.log(help);
     return;
   }
+  const installRoot = options.installRoot ?? defaultInstallRoot();
+  if (options.repairLaunchHandler) {
+    await repairCompanionLaunchProtocol(installRoot);
+    return;
+  }
   const port = companionPort();
   if (await companionIsRunning(port)) {
     console.log(`Val Bridge is already running at http://127.0.0.1:${port}/v1`);
     return;
   }
 
-  const installRoot = options.installRoot ?? defaultInstallRoot();
   let installed;
   console.log("Checking for Val Bridge updates...");
   try {

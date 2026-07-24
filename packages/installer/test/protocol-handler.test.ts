@@ -27,7 +27,7 @@ test("builds a per-user Windows protocol registration", () => {
   );
   assert.ok(
     plan.commands[2]?.arguments.includes(
-      '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\friend\\AppData\\Local\\ValOpenAIBridge\\runtime\\start.mjs" --launch-url "%1"',
+      '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\friend\\AppData\\Local\\ValOpenAIBridge\\runtime\\start.mjs" --install-dir "C:\\Users\\friend\\AppData\\Local\\ValOpenAIBridge" --launch-url "%1"',
     ),
   );
 });
@@ -53,8 +53,14 @@ test("builds a macOS URL-handler app that opens the launcher in Terminal", () =>
   );
 
   assert.match(infoPlist?.contents ?? "", /val-openai-bridge/);
+  assert.match(
+    infoPlist?.contents ?? "",
+    /<key>CFBundleTypeRole<\/key>\s*<string>Shell<\/string>/,
+  );
+  assert.doesNotMatch(infoPlist?.contents ?? "", /LSBackgroundOnly/);
   assert.match(applicationLauncher?.contents ?? "", /open -a Terminal/);
   assert.match(terminalLauncher?.contents ?? "", /runtime\/start\.mjs/);
+  assert.match(terminalLauncher?.contents ?? "", /--install-dir/);
   assert.equal(applicationLauncher?.mode, 0o755);
   assert.equal(terminalLauncher?.mode, 0o755);
   assert.match(plan.commands[0]?.file ?? "", /lsregister$/);

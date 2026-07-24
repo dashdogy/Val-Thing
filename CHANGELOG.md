@@ -2,6 +2,18 @@
 
 All notable changes to Val OpenAI Local Bridge are documented here.
 
+## 0.1.3 - 2026-07-24
+
+- Fixed the macOS companion URL-handler bundle by declaring its required
+  Launch Services role and removing a background-only flag that is valid only
+  for Mach-O applications.
+- Made handler registration self-repair on reinstall, startup, and automatic
+  update so existing 0.1.2 installations recover without manual file edits.
+- Made the popup retry the companion immediately after launch and avoid
+  reporting expected offline WebSocket attempts as extension errors.
+- Closed active sockets before an update-triggered extension reload to avoid
+  stale-worker `Extension context invalidated` errors.
+
 ## 0.1.2 - 2026-07-24
 
 - Added a popup button that launches the installed companion through a

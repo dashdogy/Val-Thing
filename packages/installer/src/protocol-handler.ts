@@ -68,11 +68,19 @@ function desktopQuote(value: string) {
     .replaceAll("%", "%%")}"`;
 }
 
-function windowsCommand(nodePath: string, startPath: string) {
-  if (nodePath.includes('"') || startPath.includes('"')) {
+function windowsCommand(
+  nodePath: string,
+  startPath: string,
+  installRoot: string,
+) {
+  if (
+    nodePath.includes('"') ||
+    startPath.includes('"') ||
+    installRoot.includes('"')
+  ) {
     throw new Error("The launch command paths cannot contain quotation marks.");
   }
-  return `"${nodePath}" "${startPath}" --launch-url "%1"`;
+  return `"${nodePath}" "${startPath}" --install-dir "${installRoot}" --launch-url "%1"`;
 }
 
 function macPlan(options: LaunchProtocolPlanOptions) {
@@ -93,7 +101,7 @@ function macPlan(options: LaunchProtocolPlanOptions) {
     "Launch Val Bridge.command",
   );
   const terminalLauncher = `#!/bin/sh
-exec ${shellQuote(options.nodePath)} ${shellQuote(options.startPath)}
+exec ${shellQuote(options.nodePath)} ${shellQuote(options.startPath)} --install-dir ${shellQuote(options.installRoot)}
 `;
   const applicationLauncher = `#!/bin/sh
 exec /usr/bin/open -a Terminal ${shellQuote(terminalLauncherPath)}
@@ -116,7 +124,9 @@ exec /usr/bin/open -a Terminal ${shellQuote(terminalLauncherPath)}
   <array>
     <dict>
       <key>CFBundleURLName</key>
-      <string>Val Bridge Launcher</string>
+      <string>io.github.dashdogy.val-openai-bridge.launch</string>
+      <key>CFBundleTypeRole</key>
+      <string>Shell</string>
       <key>CFBundleURLSchemes</key>
       <array>
         <string>${xmlEscape(PROTOCOL_SCHEME)}</string>
@@ -124,9 +134,9 @@ exec /usr/bin/open -a Terminal ${shellQuote(terminalLauncherPath)}
     </dict>
   </array>
   <key>CFBundleVersion</key>
-  <string>1</string>
-  <key>LSBackgroundOnly</key>
-  <true/>
+  <string>2</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0.1</string>
 </dict>
 </plist>
 `;
@@ -166,7 +176,7 @@ function linuxPlan(options: LaunchProtocolPlanOptions) {
   );
   const desktopPath = path.join(dataHome, "applications", DESKTOP_FILE_NAME);
   const launcher = `#!/bin/sh
-exec ${shellQuote(options.nodePath)} ${shellQuote(options.startPath)}
+exec ${shellQuote(options.nodePath)} ${shellQuote(options.startPath)} --install-dir ${shellQuote(options.installRoot)}
 `;
   const desktopFile = `[Desktop Entry]
 Version=1.0
@@ -218,7 +228,11 @@ function windowsPlan(options: LaunchProtocolPlanOptions) {
           `${key}\\shell\\open\\command`,
           "/ve",
           "/d",
-          windowsCommand(options.nodePath, options.startPath),
+          windowsCommand(
+            options.nodePath,
+            options.startPath,
+            options.installRoot,
+          ),
           "/f",
         ],
       },

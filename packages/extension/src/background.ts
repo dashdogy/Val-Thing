@@ -507,9 +507,26 @@ async function connectBridge() {
     updateBadge();
     return;
   }
-  bridgeSocket?.close();
+  const previousSocket = bridgeSocket;
+  bridgeSocket = null;
+  previousSocket?.close();
   bridgeAuthenticated = false;
   clientApiKey = "";
+  try {
+    const response = await fetch(`${url}/healthz`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(1_500),
+    });
+    if (!response.ok) {
+      updateBadge();
+      scheduleBridgeReconnect();
+      return;
+    }
+  } catch {
+    updateBadge();
+    scheduleBridgeReconnect();
+    return;
+  }
   const websocketUrl = `${url.replace("http://", "ws://")}/bridge/ws`;
   const socket = new WebSocket(websocketUrl);
   bridgeSocket = socket;
@@ -559,6 +576,21 @@ function scheduleBridgeReconnect() {
   bridgeReconnectDelay = Math.min(30_000, bridgeReconnectDelay * 2);
 }
 
+function reloadExtensionCleanly() {
+  if (bridgeReconnectTimer) {
+    clearTimeout(bridgeReconnectTimer);
+    bridgeReconnectTimer = undefined;
+  }
+  const socket = bridgeSocket;
+  bridgeSocket = null;
+  socket?.close();
+  const currentValSocket = valSocket;
+  valSocket = null;
+  currentValSocket?.removeAllListeners();
+  currentValSocket?.disconnect();
+  chrome.runtime.reload();
+}
+
 async function handleBridgeMessage(message: ServerToExtensionMessage) {
   switch (message.type) {
     case "bridge.authenticated":
@@ -581,7 +613,7 @@ async function handleBridgeMessage(message: ServerToExtensionMessage) {
       sendBridge({ type: "bridge.pong", timestamp: message.timestamp });
       break;
     case "bridge.reload":
-      chrome.runtime.reload();
+      reloadExtensionCleanly();
       break;
     case "relay.request":
       void handleRelayRequest(message.id, message.request);
@@ -1561,6 +1593,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message?.type === "POPUP_GET_STATUS") {
       return await popupStatus();
+    }
+    if (message?.type === "POPUP_RECONNECT_BRIDGE") {
+      bridgeReconnectDelay = 1_000;
+      await connectBridge();
+      return { ok: true };
     }
     if (message?.type === "POPUP_PAIR") {
       await pairBridge(

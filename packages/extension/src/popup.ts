@@ -262,6 +262,7 @@ launchCompanionButton.addEventListener("click", async () => {
       url: COMPANION_LAUNCH_URL,
       active: true,
     });
+    await message({ type: "POPUP_RECONNECT_BRIDGE" });
     launchCompanionStatus.textContent =
       "Update check requested; waiting for companion…";
     if (launchResetTimer) clearTimeout(launchResetTimer);

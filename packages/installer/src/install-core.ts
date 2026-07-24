@@ -235,6 +235,45 @@ export async function readInstalledState(
   };
 }
 
+async function registerInstalledLaunchProtocol(
+  installed: InstalledState,
+  logger: Logger,
+) {
+  if (process.env.VAL_BRIDGE_SKIP_PROTOCOL_REGISTRATION === "1") return;
+  await registerCompanionLaunchProtocol({
+    installRoot: installed.installRoot,
+    startPath: installed.startPath,
+    logger,
+  });
+}
+
+async function tryRegisterInstalledLaunchProtocol(
+  installed: InstalledState,
+  logger: Logger,
+) {
+  try {
+    await registerInstalledLaunchProtocol(installed, logger);
+  } catch (error) {
+    logger.warn(
+      `Could not register the extension launch button: ${
+        error instanceof Error ? error.message : String(error)
+      }. The generated start command still works.`,
+    );
+  }
+}
+
+export async function repairCompanionLaunchProtocol(
+  installRoot = defaultInstallRoot(),
+  logger: Logger = console,
+) {
+  const installed = await readInstalledState(installRoot);
+  if (!installed) {
+    throw new Error("Val Bridge is not installed in the selected directory.");
+  }
+  await registerInstalledLaunchProtocol(installed, logger);
+  return installed;
+}
+
 async function validatePayload(payloadRoot: string, release: ResolvedRelease) {
   const required = [
     "server.mjs",
@@ -278,7 +317,6 @@ async function installVersion(
   payloadRoot: string,
   release: ResolvedRelease,
   installRoot: string,
-  logger: Logger,
 ) {
   const paths = runtimePaths(installRoot);
   await mkdir(paths.versions, { recursive: true });
@@ -382,21 +420,6 @@ exec node "$SCRIPT_DIR/update.mjs" "$@"
     source: release.source,
   };
   await writeAtomic(paths.current, `${JSON.stringify(current, null, 2)}\n`);
-  if (process.env.VAL_BRIDGE_SKIP_PROTOCOL_REGISTRATION !== "1") {
-    try {
-      await registerCompanionLaunchProtocol({
-        installRoot: paths.root,
-        startPath: paths.start,
-        logger,
-      });
-    } catch (error) {
-      logger.warn(
-        `Could not register the extension launch button: ${
-          error instanceof Error ? error.message : String(error)
-        }. The generated start command still works.`,
-      );
-    }
-  }
   await writeFile(paths.reloadMarker, "reload\n", "utf8");
 }
 
@@ -413,6 +436,7 @@ export async function installLatest(
   const existing = await readInstalledState(installRoot);
   if (existing && compareVersions(existing.version, release.version) >= 0) {
     logger.log(`Val Bridge v${existing.version} is already installed.`);
+    await tryRegisterInstalledLaunchProtocol(existing, logger);
     return {
       ...existing,
       updated: false,
@@ -426,6 +450,7 @@ export async function installLatest(
     temporaryRoot = await mkdtemp(join(tmpdir(), "val-bridge-install-"));
     const afterLock = await readInstalledState(installRoot);
     if (afterLock && compareVersions(afterLock.version, release.version) >= 0) {
+      await tryRegisterInstalledLaunchProtocol(afterLock, logger);
       return {
         ...afterLock,
         updated: false,
@@ -441,11 +466,12 @@ export async function installLatest(
     const payloadRoot = join(temporaryRoot, "payload");
     await extractZip(archive, payloadRoot);
     await validatePayload(payloadRoot, release);
-    await installVersion(payloadRoot, release, installRoot, logger);
+    await installVersion(payloadRoot, release, installRoot);
     const installed = await readInstalledState(installRoot);
     if (!installed) {
       throw new Error("The installed runtime failed validation.");
     }
+    await tryRegisterInstalledLaunchProtocol(installed, logger);
     logger.log(`Installed Val Bridge v${installed.version}.`);
     return {
       ...installed,

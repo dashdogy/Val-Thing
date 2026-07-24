@@ -5,11 +5,12 @@ export type CliOptions = {
   installRoot?: string;
   apiUrl?: string;
   launchUrl?: typeof COMPANION_LAUNCH_URL;
+  repairLaunchHandler: boolean;
   help: boolean;
 };
 
 export function parseCliOptions(arguments_: string[]) {
-  const options: CliOptions = { help: false };
+  const options: CliOptions = { help: false, repairLaunchHandler: false };
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
     if (argument === "--help" || argument === "-h") {
@@ -38,6 +39,10 @@ export function parseCliOptions(arguments_: string[]) {
       }
       options.launchUrl = value;
       index += 1;
+      continue;
+    }
+    if (argument === "--repair-launch-handler") {
+      options.repairLaunchHandler = true;
       continue;
     }
     throw new Error(`Unknown option: ${argument}`);

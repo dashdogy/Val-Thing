@@ -1,5 +1,7 @@
 import { ValBridgeServer } from "./server.js";
+import { repairInstalledLaunchHandler } from "./launch-handler-repair.js";
 
+await repairInstalledLaunchHandler();
 const server = await ValBridgeServer.create();
 
 const shutdown = async () => {
