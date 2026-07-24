@@ -2,6 +2,12 @@
 
 All notable changes to Val OpenAI Local Bridge are documented here.
 
+## 0.1.10 - 2026-07-24
+
+- Changed configured relay timeouts into reasoning-activity deadlines: each
+  genuine reasoning chunk refreshes the timer, while silent relays still time
+  out and are cancelled upstream.
+
 ## 0.1.9 - 2026-07-24
 
 - Routed `/v1/responses` through Val's native `/openai/v1/responses` endpoint,

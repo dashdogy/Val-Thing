@@ -13,6 +13,11 @@ import { PROTOCOL_VERSION } from "@val-bridge/protocol";
 import type WebSocket from "ws";
 import { OpenAIHttpError, relayErrorToHttp } from "./errors.js";
 import type { SecretsStore } from "./config.js";
+import {
+  reasoningTextFromRecord,
+  reasoningTextFromStatus,
+  splitValReasoningMarkup,
+} from "./reasoning.js";
 
 type ExecuteCallbacks = {
   onAccepted?: (accepted: RelayAccepted) => void;
@@ -24,6 +29,7 @@ type PendingRequest = {
   reject: (error: unknown) => void;
   callbacks: ExecuteCallbacks;
   timeout?: NodeJS.Timeout;
+  timeoutMs?: number;
   abortListener?: () => void;
   signal?: AbortSignal;
 };
@@ -50,6 +56,44 @@ function parseMessage(
   } catch {
     return null;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function recordContainsReasoning(record: Record<string, unknown>) {
+  if (reasoningTextFromRecord(record)) return true;
+  if (!Array.isArray(record.choices)) return false;
+  return record.choices.some((rawChoice) => {
+    if (!isRecord(rawChoice)) return false;
+    if (reasoningTextFromRecord(rawChoice)) return true;
+    return [rawChoice.delta, rawChoice.message].some(
+      (value) => isRecord(value) && Boolean(reasoningTextFromRecord(value)),
+    );
+  });
+}
+
+function containsReasoningChunk(event: ValRelayEvent) {
+  if (event.kind === "openai") {
+    return recordContainsReasoning(event.data);
+  }
+  if (event.kind === "status") {
+    return Boolean(reasoningTextFromStatus(event.data));
+  }
+  if (event.kind === "sse") {
+    return (
+      recordContainsReasoning(event.data) ||
+      recordContainsReasoning({
+        ...event.data,
+        type: event.eventType,
+      })
+    );
+  }
+  if (event.kind === "delta" || event.kind === "replace") {
+    return Boolean(splitValReasoningMarkup(event.content).reasoning);
+  }
+  return false;
 }
 
 export class BridgeHub {
@@ -193,6 +237,9 @@ export class BridgeHub {
       case "relay.event": {
         const pending = this.pending.get(message.id);
         if (!pending) break;
+        if (containsReasoningChunk(message.event)) {
+          this.armTimeout(message.id, pending);
+        }
         try {
           pending.callbacks.onEvent?.(message.event);
         } catch (error) {
@@ -272,30 +319,11 @@ export class BridgeHub {
     const id = randomUUID();
     const effectiveTimeout = timeoutMs ?? this.requestTimeoutMs;
     return await new Promise<RelayDoneResult>((resolve, reject) => {
-      let timeout: NodeJS.Timeout | undefined;
-      if (effectiveTimeout > 0) {
-        timeout = setTimeout(() => {
-          const pending = this.pending.get(id);
-          if (!pending) return;
-          this.sendActive({ type: "relay.cancel", id });
-          this.cleanupPending(id, pending);
-          reject(
-            new OpenAIHttpError(
-              504,
-              "upstream_timeout",
-              "Val did not complete the request before the configured timeout.",
-              "api_connection_error",
-            ),
-          );
-        }, effectiveTimeout);
-        timeout.unref();
-      }
-
       const pending: PendingRequest = {
         resolve,
         reject,
         callbacks,
-        ...(timeout ? { timeout } : {}),
+        ...(effectiveTimeout > 0 ? { timeoutMs: effectiveTimeout } : {}),
         ...(signal ? { signal } : {}),
       };
 
@@ -312,6 +340,7 @@ export class BridgeHub {
       }
 
       this.pending.set(id, pending);
+      this.armTimeout(id, pending);
       this.sendActive({ type: "relay.request", id, request });
     });
   }
@@ -360,6 +389,26 @@ export class BridgeHub {
       pending.signal.removeEventListener("abort", pending.abortListener);
     }
     this.pending.delete(id);
+  }
+
+  private armTimeout(id: string, pending: PendingRequest) {
+    clearTimeout(pending.timeout);
+    if (!pending.timeoutMs) return;
+    pending.timeout = setTimeout(() => {
+      const current = this.pending.get(id);
+      if (!current) return;
+      this.sendActive({ type: "relay.cancel", id });
+      this.cleanupPending(id, current);
+      current.reject(
+        new OpenAIHttpError(
+          504,
+          "upstream_timeout",
+          "Val did not complete the request before the configured timeout.",
+          "api_connection_error",
+        ),
+      );
+    }, pending.timeoutMs);
+    pending.timeout.unref();
   }
 
   private rejectAll(error: unknown) {
