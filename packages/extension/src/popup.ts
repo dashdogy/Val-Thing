@@ -149,7 +149,7 @@ function renderUsage(stats: PopupStatus["stats"]) {
       : "Idle";
   usageActivity.classList.toggle("busy", stats.activeRequests > 0);
 
-  reasoningStatus.textContent =
+  const reasoningAvailability =
     stats.lastReasoningStatus === "summary"
       ? "Summary received"
       : stats.lastReasoningStatus === "hidden"
@@ -159,6 +159,14 @@ function renderUsage(stats: PopupStatus["stats"]) {
             ? "None used"
             : "Not returned"
           : "Not reported yet";
+  const lastReasoningCount = stats.lastReasoningTokensReported
+    ? `${numberFormatter.format(stats.lastReasoningTokens ?? 0)} ${
+        stats.lastReasoningTokens === 1 ? "token" : "tokens"
+      }`
+    : "";
+  reasoningStatus.textContent = lastReasoningCount
+    ? `${reasoningAvailability} · ${lastReasoningCount}`
+    : reasoningAvailability;
   const disclosed = stats.reasoningSummaryRequests;
   const hidden = stats.hiddenReasoningRequests;
   reasoningNote.textContent =
@@ -169,14 +177,15 @@ function renderUsage(stats: PopupStatus["stats"]) {
         : "No reasoning summary text has been returned this session.";
 
   const unfinished = stats.failedRequests + stats.cancelledRequests;
-  usageNote.textContent =
+  const usageDetail =
     stats.requests === 0
-      ? "Resets when the browser closes"
+      ? "No usage recorded yet"
       : stats.meteredRequests < stats.requests
         ? `${numberFormatter.format(stats.meteredRequests)} of ${numberFormatter.format(stats.requests)} requests reported usage`
         : unfinished > 0
           ? `${numberFormatter.format(unfinished)} request${unfinished === 1 ? "" : "s"} did not complete`
           : "Exact usage reported by Val";
+  usageNote.textContent = `${usageDetail} · saved to companion disk`;
   costNote.textContent =
     stats.requests === 0 || stats.pricedRequests === stats.meteredRequests
       ? "OpenAI-equivalent estimate · not a Val charge"

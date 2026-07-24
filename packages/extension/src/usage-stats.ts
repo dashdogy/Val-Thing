@@ -1,28 +1,11 @@
-export type UsageOutcome = "completed" | "failed" | "cancelled";
-export type ReasoningAvailability = "summary" | "hidden" | "unavailable";
+import type {
+  UsageReasoningStatus,
+  UsageStatsSnapshot,
+} from "@val-bridge/protocol";
 
-export type SessionUsageStats = {
-  startedAt: number;
-  lastUpdatedAt: number;
-  requests: number;
-  completedRequests: number;
-  failedRequests: number;
-  cancelledRequests: number;
-  meteredRequests: number;
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-  reasoningTokens: number;
-  reasoningMeteredRequests: number;
-  reasoningSummaryRequests: number;
-  hiddenReasoningRequests: number;
-  pricedRequests: number;
-  estimatedOpenAICostNanodollars: number;
-  lastRequestTokens?: number;
-  lastReasoningTokens?: number;
-  lastReasoningTokensReported?: boolean;
-  lastReasoningStatus?: ReasoningAvailability;
-};
+export type UsageOutcome = "completed" | "failed" | "cancelled";
+export type ReasoningAvailability = UsageReasoningStatus;
+export type SessionUsageStats = UsageStatsSnapshot;
 
 type UsageCounts = {
   inputTokens: number;
@@ -270,6 +253,41 @@ export function restoreSessionUsageStats(
     restored.lastReasoningStatus = lastReasoningStatus;
   }
   return restored;
+}
+
+function statsProgress(stats: SessionUsageStats) {
+  return (
+    stats.requests +
+    stats.completedRequests +
+    stats.failedRequests +
+    stats.cancelledRequests +
+    stats.meteredRequests +
+    stats.totalTokens
+  );
+}
+
+export function newerUsageStats(
+  current: SessionUsageStats,
+  persisted: SessionUsageStats,
+): SessionUsageStats {
+  if (current.requests > 0 && persisted.requests === 0) {
+    return { ...current };
+  }
+  if (current.requests === 0 && persisted.requests > 0) {
+    return { ...persisted };
+  }
+  if (current.lastUpdatedAt !== persisted.lastUpdatedAt) {
+    return {
+      ...(persisted.lastUpdatedAt > current.lastUpdatedAt
+        ? persisted
+        : current),
+    };
+  }
+  return {
+    ...(statsProgress(persisted) >= statsProgress(current)
+      ? persisted
+      : current),
+  };
 }
 
 export function recordUsageRequest(

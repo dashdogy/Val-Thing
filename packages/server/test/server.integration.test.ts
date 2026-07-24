@@ -8,6 +8,7 @@ import type {
   RelayCompletionRequest,
   RelayResponsesRequest,
   ServerToExtensionMessage,
+  UsageStatsSnapshot,
 } from "@val-bridge/protocol";
 import { PROTOCOL_VERSION } from "@val-bridge/protocol";
 import OpenAI from "openai";
@@ -39,6 +40,7 @@ class FakeValExtension {
   readonly responsesRequests: RelayResponsesRequest[] = [];
   readonly cancelledRequestIds: string[] = [];
   readonly heldRequestIds: string[] = [];
+  authenticatedUsageStats?: UsageStatsSnapshot;
   reloadRequests = 0;
   private chatCounter = 0;
 
@@ -120,9 +122,14 @@ class FakeValExtension {
     if (index >= 0) this.heldRequestIds.splice(index, 1);
   }
 
+  sendUsageStats(stats: UsageStatsSnapshot) {
+    this.send({ type: "bridge.usage", stats });
+  }
+
   private handleMessage(message: ServerToExtensionMessage) {
     if (message.type === "bridge.authenticated") {
       this.clientApiKey = message.clientApiKey;
+      this.authenticatedUsageStats = message.usageStats;
       this.send({
         type: "bridge.status",
         status: {
@@ -1893,6 +1900,77 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   assert.ok(!diagnostics.includes(extension.bridgeSecret));
 });
 
+test("persists sanitized extension usage and restores it on authentication", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-usage-sync-test-"),
+  );
+  const server = await ValBridgeServer.create({
+    config: { port: 0, configDirectory },
+    quiet: true,
+  });
+  await server.listen();
+  const extension = new FakeValExtension(server);
+  await extension.pair();
+  await extension.connect();
+
+  let reopened: ValBridgeServer | undefined;
+  let restoredExtension: FakeValExtension | undefined;
+  t.after(async () => {
+    extension.close();
+    restoredExtension?.close();
+    await reopened?.close();
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  assert.equal(extension.authenticatedUsageStats, undefined);
+  const stats: UsageStatsSnapshot = {
+    startedAt: 100,
+    lastUpdatedAt: 200,
+    requests: 2,
+    completedRequests: 2,
+    failedRequests: 0,
+    cancelledRequests: 0,
+    meteredRequests: 2,
+    inputTokens: 10,
+    outputTokens: 5,
+    totalTokens: 15,
+    reasoningTokens: 3,
+    reasoningMeteredRequests: 2,
+    reasoningSummaryRequests: 1,
+    hiddenReasoningRequests: 1,
+    pricedRequests: 2,
+    estimatedOpenAICostNanodollars: 1_000,
+    lastRequestTokens: 8,
+    lastReasoningTokens: 2,
+    lastReasoningTokensReported: true,
+    lastReasoningStatus: "summary",
+  };
+  extension.sendUsageStats(stats);
+  await waitFor(
+    () => server.usageStats.snapshot()?.totalTokens === 15,
+    "usage statistics persistence",
+  );
+  await server.usageStats.flush();
+
+  const persisted = await readFile(
+    join(configDirectory, "usage-stats.json"),
+    "utf8",
+  );
+  assert.ok(!persisted.includes("messages"));
+  assert.ok(!persisted.includes("model"));
+
+  reopened = await ValBridgeServer.create({
+    config: { port: 0, configDirectory },
+    quiet: true,
+  });
+  await reopened.listen();
+  restoredExtension = new FakeValExtension(reopened);
+  restoredExtension.bridgeSecret = reopened.secrets.get().bridgeSecret;
+  await restoredExtension.connect();
+  assert.deepEqual(restoredExtension.authenticatedUsageStats, stats);
+});
+
 test("limits concurrency, cancels interrupted streams, and reports disconnection", async (t) => {
   const configDirectory = await mkdtemp(
     join(tmpdir(), "val-bridge-flow-test-"),
@@ -1901,7 +1979,7 @@ test("limits concurrency, cancels interrupted streams, and reports disconnection
     config: {
       port: 0,
       configDirectory,
-      maxConcurrency: 4,
+      maxConcurrency: 16,
       requestTimeoutMs: 2_000,
     },
     quiet: true,
@@ -1917,7 +1995,7 @@ test("limits concurrency, cancels interrupted streams, and reports disconnection
     await rm(configDirectory, { recursive: true, force: true });
   });
 
-  const pendingResponses = Array.from({ length: 4 }, (_, index) =>
+  const pendingResponses = Array.from({ length: 16 }, (_, index) =>
     apiFetch(server, "/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1928,8 +2006,8 @@ test("limits concurrency, cancels interrupted streams, and reports disconnection
     }),
   );
   await waitFor(
-    () => extension.heldRequestIds.length === 4,
-    "four concurrent requests",
+    () => extension.heldRequestIds.length === 16,
+    "16 concurrent requests",
   );
 
   const limited = await apiFetch(server, "/v1/chat/completions", {
@@ -1937,7 +2015,7 @@ test("limits concurrency, cancels interrupted streams, and reports disconnection
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       model: "val-test",
-      messages: [{ role: "user", content: "fifth" }],
+      messages: [{ role: "user", content: "seventeenth" }],
     }),
   });
   assert.equal(limited.status, 429);

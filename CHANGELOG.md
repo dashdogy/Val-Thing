@@ -2,6 +2,19 @@
 
 All notable changes to Val OpenAI Local Bridge are documented here.
 
+## 0.1.11 - 2026-07-25
+
+- Raised the default and maximum companion concurrency to 16 simultaneous
+  requests, the practical ceiling selected after live Val load testing.
+- Persisted sanitized usage counters, token totals, reasoning-token totals, and
+  OpenAI-equivalent cost estimates atomically in the companion configuration
+  directory so statistics survive browser and companion restarts.
+- Added authenticated usage synchronization between the extension and
+  companion while keeping prompts, responses, models, identities, and secrets
+  out of the usage file.
+- Clarified the popup's saved usage totals and displayed the exact reasoning
+  token count reported for the most recent request.
+
 ## 0.1.10 - 2026-07-24
 
 - Changed configured relay timeouts into reasoning-activity deadlines: each

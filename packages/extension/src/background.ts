@@ -33,6 +33,7 @@ import {
 import { SseParser, type ParsedSseEvent } from "./sse-parser.js";
 import {
   createSessionUsageStats,
+  newerUsageStats,
   recordUsageRequest,
   responseUsageDetails,
   restoreSessionUsageStats,
@@ -129,6 +130,9 @@ function persistUsageStats() {
   usageStatsWrite = usageStatsWrite
     .catch(() => undefined)
     .then(() => chrome.storage.session.set({ [USAGE_STATS_KEY]: snapshot }));
+  if (bridgeAuthenticated) {
+    sendBridge({ type: "bridge.usage", stats: snapshot });
+  }
 }
 
 function persistUpdateStatus() {
@@ -661,6 +665,13 @@ async function handleBridgeMessage(message: ServerToExtensionMessage) {
       bridgeAuthenticated = true;
       clientApiKey = message.clientApiKey;
       bridgeReconnectDelay = 1_000;
+      if (message.usageStats) {
+        usageStats = newerUsageStats(
+          usageStats,
+          restoreSessionUsageStats(message.usageStats),
+        );
+      }
+      persistUsageStats();
       sendBridge({ type: "bridge.status", status: extensionStatus });
       updateBadge();
       void checkForUpdates();
