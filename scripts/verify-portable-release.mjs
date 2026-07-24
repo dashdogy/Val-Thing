@@ -195,6 +195,7 @@ try {
     [
       npxCli,
       "--yes",
+      "--allow-remote=all",
       oneLineInstallerSpec,
       "--install-dir",
       installRoot,

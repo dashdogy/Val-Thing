@@ -27,7 +27,7 @@ npm run check
 Packaged builds are published through the repository's Releases page.
 
 ```shell
-npx --yes https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz
+npx --yes --allow-remote=all https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz
 ```
 
 The companion listens on all IPv4 interfaces by default. Keep its API key

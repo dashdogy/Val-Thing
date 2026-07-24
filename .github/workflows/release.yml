@@ -54,5 +54,5 @@ jobs:
             gh release create "$RELEASE_TAG" "${assets[@]}" \
               --verify-tag \
               --title "$RELEASE_TAG" \
-              --notes "Requires Node.js 24 or newer. Install with: npx --yes https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz"
+              --notes "Requires Node.js 24 or newer. Install with: npx --yes --allow-remote=all https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz"
           fi

@@ -8,7 +8,7 @@ import {
 const help = `Val Bridge installer
 
 Usage:
-  npx --yes https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz
+  npx --yes --allow-remote=all https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz
   node install.mjs [--install-dir <path>] [--release-api <url>]
 `;
 
