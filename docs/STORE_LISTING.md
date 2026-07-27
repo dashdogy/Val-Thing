@@ -45,7 +45,10 @@ generated bridge secret, companion URL, and sanitized update status.
 
 Displays the companion's client API key behind a masked reveal/copy control after the local bridge authenticates; the key is not persisted by the extension.
 
-Provides a user-triggered button that asks the local companion to merge the endpoint, API key, and OpenAI GPT-5.6 models into the user's OpenCode configuration with a backup.
+Asks the authenticated local companion to merge the endpoint, API key, and
+OpenAI GPT-5.6 models into the user's OpenCode configuration with a backup.
+This runs after a bridge update and can also be rerun with a user-triggered
+button.
 
 Provides a user-triggered **Launch companion** button. It opens only the fixed `val-openai-bridge://launch` URL registered by the separately installed companion and sends no user data through that URL.
 

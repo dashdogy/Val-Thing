@@ -39,7 +39,8 @@ and token counters, never prompts, responses, or credentials.
 
 Packaged builds are published through the repository's Releases page.
 Installed builds periodically check for a newer release and offer an in-app
-update when one is available.
+update when one is available. OpenCode settings refresh automatically after an
+installed bridge update.
 
 ```shell
 npx --yes --allow-remote=all https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz

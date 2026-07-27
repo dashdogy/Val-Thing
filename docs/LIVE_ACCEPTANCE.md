@@ -17,6 +17,9 @@ history.
       non-loopback requests cannot read it.
 - [ ] On macOS, the launch opens Terminal and runs the companion without adding an extension error; repeating the installer repairs an existing URL handler.
 - [ ] The launcher checks for a GitHub release update before the companion starts; an offline update failure still starts the installed version.
+- [ ] After an update reloads the extension and companion, OpenCode is
+      reconfigured automatically once Val is ready; a temporary failure remains
+      pending and retries without another button click.
 - [ ] Once connected, the popup changes the launch button to **Companion running**.
 - [ ] The client API key is masked by default; **Show** reveals it and **Copy** matches the companion configuration.
 - [ ] **Rotate** invalidates the old API key, displays the new one only after

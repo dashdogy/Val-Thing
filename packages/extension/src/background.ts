@@ -47,6 +47,15 @@ import {
   openAIHttpGeneration,
   OpenAIHttpUsageCapture,
 } from "./openai-usage-capture.js";
+import {
+  createOpenCodeAutoConfigState,
+  extensionVersionWasUpdated,
+  openCodeAutoConfigReady,
+  openCodeAutoConfigRetryMinutes,
+  recordOpenCodeAutoConfigFailure,
+  restoreOpenCodeAutoConfigState,
+  type OpenCodeAutoConfigState,
+} from "./opencode-auto-config.js";
 import { SseParser, type ParsedSseEvent } from "./sse-parser.js";
 import {
   createSessionUsageStats,
@@ -72,7 +81,10 @@ const BRIDGE_SECRET_KEY = "bridgeSecret";
 const BRIDGE_URL_KEY = "bridgeUrl";
 const USAGE_STATS_KEY = "usageStats";
 const UPDATE_STATUS_KEY = "updateStatus";
+const OPENCODE_AUTO_CONFIG_KEY = "openCodeAutoConfig";
+const LAST_EXTENSION_VERSION_KEY = "lastExtensionVersion";
 const UPDATE_ALARM_NAME = "val-bridge-update-check";
+const OPENCODE_AUTO_CONFIG_ALARM_NAME = "val-bridge-opencode-config";
 const UPDATE_CHECK_INTERVAL_MINUTES = 6 * 60;
 const UPDATE_CHECK_MINIMUM_GAP_MS = 15 * 60_000;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
@@ -87,7 +99,18 @@ type PopupStatus = ExtensionStatus & {
   clientIpAllowlist: boolean;
   clientApiKey?: string;
   update: ExtensionUpdateStatus;
+  openCodeAutoConfig: {
+    pending: boolean;
+    attempts: number;
+    lastError?: string;
+  };
   stats: SessionUsageStats & { activeRequests: number };
+};
+
+type OpenCodeConfigureResult = {
+  modelsConfigured: number;
+  updated: boolean;
+  backupCreated: boolean;
 };
 
 type MutableToolCall = {
@@ -137,6 +160,9 @@ let usageStatsWrite: Promise<void> = Promise.resolve();
 let extensionUpdateStatus = createUpdateStatus(EXTENSION_VERSION);
 let updateStatusWrite: Promise<void> = Promise.resolve();
 let updateCheckPromise: Promise<ExtensionUpdateStatus> | undefined;
+let openCodeAutoConfigState: OpenCodeAutoConfigState | undefined;
+let openCodeAutoConfigPromise: Promise<void> | undefined;
+let openCodeConfigurePromise: Promise<OpenCodeConfigureResult> | undefined;
 
 function pendingMessageKey(
   sessionId: string,
@@ -167,6 +193,89 @@ function setExtensionUpdateStatus(status: ExtensionUpdateStatus) {
   extensionUpdateStatus = status;
   persistUpdateStatus();
   updateBadge();
+}
+
+async function scheduleOpenCodeAutoConfigRetry(
+  delayMinutes: number,
+  replace = false,
+) {
+  if (
+    !openCodeAutoConfigState ||
+    openCodeAutoConfigState.targetVersion !== EXTENSION_VERSION
+  ) {
+    return;
+  }
+  const scheduled = await chrome.alarms.get(OPENCODE_AUTO_CONFIG_ALARM_NAME);
+  if (replace || !scheduled) {
+    await chrome.alarms.create(OPENCODE_AUTO_CONFIG_ALARM_NAME, {
+      delayInMinutes: delayMinutes,
+    });
+  }
+}
+
+async function markOpenCodeAutoConfigPending(targetVersion: string) {
+  const state = createOpenCodeAutoConfigState(targetVersion);
+  await chrome.storage.local.set({ [OPENCODE_AUTO_CONFIG_KEY]: state });
+  if (targetVersion !== EXTENSION_VERSION) return;
+  openCodeAutoConfigState = state;
+  await scheduleOpenCodeAutoConfigRetry(1);
+  requestAutomaticOpenCodeConfig();
+}
+
+async function completeOpenCodeAutoConfig(targetVersion: string) {
+  if (openCodeAutoConfigState?.targetVersion !== targetVersion) return;
+  openCodeAutoConfigState = undefined;
+  await Promise.all([
+    chrome.storage.local.remove(OPENCODE_AUTO_CONFIG_KEY),
+    chrome.alarms.clear(OPENCODE_AUTO_CONFIG_ALARM_NAME),
+  ]);
+}
+
+function requestAutomaticOpenCodeConfig() {
+  if (openCodeAutoConfigPromise) return;
+  openCodeAutoConfigPromise = maybeConfigureOpenCodeAfterUpdate().finally(
+    () => {
+      openCodeAutoConfigPromise = undefined;
+    },
+  );
+  void openCodeAutoConfigPromise.catch(() => undefined);
+}
+
+async function maybeConfigureOpenCodeAfterUpdate() {
+  const state = openCodeAutoConfigState;
+  if (!state || state.targetVersion !== EXTENSION_VERSION) {
+    return;
+  }
+  if (
+    !openCodeAutoConfigReady({
+      bridgeAuthenticated,
+      valSession: extensionStatus.valSession,
+      valSocket: extensionStatus.valSocket,
+      compatible: extensionStatus.compatible,
+    })
+  ) {
+    await scheduleOpenCodeAutoConfigRetry(1);
+    return;
+  }
+
+  await scheduleOpenCodeAutoConfigRetry(1, true);
+  try {
+    await configureOpenCode();
+    await completeOpenCodeAutoConfig(state.targetVersion);
+  } catch (error) {
+    if (openCodeAutoConfigState?.targetVersion !== state.targetVersion) {
+      return;
+    }
+    const failed = recordOpenCodeAutoConfigFailure(state, error);
+    openCodeAutoConfigState = failed;
+    await chrome.storage.local.set({
+      [OPENCODE_AUTO_CONFIG_KEY]: failed,
+    });
+    await scheduleOpenCodeAutoConfigRetry(
+      openCodeAutoConfigRetryMinutes(failed.attempts),
+      true,
+    );
+  }
 }
 
 function recordPendingRequest() {
@@ -266,6 +375,7 @@ function updateStatus(patch: Partial<ExtensionStatus>) {
   extensionStatus = { ...extensionStatus, ...patch, extensionConnected: true };
   updateBadge();
   sendBridge({ type: "bridge.status", status: extensionStatus });
+  requestAutomaticOpenCodeConfig();
 }
 
 function updateBadge() {
@@ -699,6 +809,7 @@ async function handleBridgeMessage(message: ServerToExtensionMessage) {
       sendBridge({ type: "bridge.status", status: extensionStatus });
       updateBadge();
       void checkForUpdates();
+      requestAutomaticOpenCodeConfig();
       break;
     case "bridge.ping":
       sendBridge({ type: "bridge.pong", timestamp: message.timestamp });
@@ -2040,7 +2151,7 @@ async function pairBridge(code: string, rawUrl: string) {
   await connectBridge();
 }
 
-async function configureOpenCode() {
+async function performOpenCodeConfiguration(): Promise<OpenCodeConfigureResult> {
   const { secret, url } = await getBridgeSettings();
   if (!secret) {
     throw new Error("Pair the extension with the companion first.");
@@ -2089,6 +2200,20 @@ async function configureOpenCode() {
     updated: body.updated,
     backupCreated: body.backup_created === true,
   };
+}
+
+async function configureOpenCode() {
+  if (openCodeConfigurePromise) return await openCodeConfigurePromise;
+  openCodeConfigurePromise = performOpenCodeConfiguration().finally(() => {
+    openCodeConfigurePromise = undefined;
+  });
+  return await openCodeConfigurePromise;
+}
+
+async function configureOpenCodeManually() {
+  const result = await configureOpenCode();
+  await completeOpenCodeAutoConfig(EXTENSION_VERSION);
+  return result;
 }
 
 async function rotateClientApiKey() {
@@ -2290,6 +2415,7 @@ async function applyAvailableUpdate() {
 
   let accepted = false;
   try {
+    await markOpenCodeAutoConfigPending(status.latestVersion);
     const response = await fetch(`${url}/bridge/update/prepare`, {
       method: "POST",
       headers: {
@@ -2362,6 +2488,17 @@ async function popupStatus(): Promise<PopupStatus> {
     clientIpAllowlist: companionClientIpAllowlist,
     ...(clientApiKey ? { clientApiKey } : {}),
     update: extensionUpdateStatus,
+    openCodeAutoConfig: {
+      pending: openCodeAutoConfigState?.targetVersion === EXTENSION_VERSION,
+      attempts:
+        openCodeAutoConfigState?.targetVersion === EXTENSION_VERSION
+          ? openCodeAutoConfigState.attempts
+          : 0,
+      ...(openCodeAutoConfigState?.targetVersion === EXTENSION_VERSION &&
+      openCodeAutoConfigState.lastError
+        ? { lastError: openCodeAutoConfigState.lastError }
+        : {}),
+    },
     stats: {
       ...usageStats,
       activeRequests: new Set([
@@ -2436,7 +2573,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return { ok: true };
     }
     if (message?.type === "POPUP_CONFIGURE_OPENCODE") {
-      return { ok: true, result: await configureOpenCode() };
+      return { ok: true, result: await configureOpenCodeManually() };
     }
     if (message?.type === "POPUP_ROTATE_API_KEY") {
       return { ok: true, result: await rotateClientApiKey() };
@@ -2488,11 +2625,30 @@ async function bootstrap() {
     SESSION_TOKEN_KEY,
     USAGE_STATS_KEY,
   ]);
-  const storedLocal = await chrome.storage.local.get(UPDATE_STATUS_KEY);
+  const storedLocal = await chrome.storage.local.get([
+    UPDATE_STATUS_KEY,
+    OPENCODE_AUTO_CONFIG_KEY,
+    LAST_EXTENSION_VERSION_KEY,
+  ]);
   extensionUpdateStatus = restoreUpdateStatus(
     storedLocal[UPDATE_STATUS_KEY],
     EXTENSION_VERSION,
   );
+  openCodeAutoConfigState = restoreOpenCodeAutoConfigState(
+    storedLocal[OPENCODE_AUTO_CONFIG_KEY],
+    EXTENSION_VERSION,
+  );
+  await chrome.storage.local.set({
+    [LAST_EXTENSION_VERSION_KEY]: EXTENSION_VERSION,
+  });
+  if (
+    extensionVersionWasUpdated(
+      storedLocal[LAST_EXTENSION_VERSION_KEY],
+      EXTENSION_VERSION,
+    )
+  ) {
+    await markOpenCodeAutoConfigPending(EXTENSION_VERSION);
+  }
   usageStats = restoreSessionUsageStats(stored[USAGE_STATS_KEY]);
   await ensureUpdateAlarm();
   if (
@@ -2508,6 +2664,7 @@ async function bootstrap() {
   }
   await connectBridge();
   void checkForUpdates();
+  requestAutomaticOpenCodeConfig();
   updateBadge();
 }
 
@@ -2530,10 +2687,24 @@ function runBootstrap() {
 }
 
 chrome.runtime.onStartup.addListener(runBootstrap);
-chrome.runtime.onInstalled.addListener(runBootstrap);
+chrome.runtime.onInstalled.addListener((details) => {
+  void (async () => {
+    if (details.reason === "update") {
+      await markOpenCodeAutoConfigPending(EXTENSION_VERSION);
+    }
+    await startBootstrap();
+  })().catch((error) => {
+    updateStatus({
+      lastError:
+        error instanceof Error ? error.message : "Extension startup failed.",
+    });
+  });
+});
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === UPDATE_ALARM_NAME) {
     void checkForUpdates(true);
+  } else if (alarm.name === OPENCODE_AUTO_CONFIG_ALARM_NAME) {
+    requestAutomaticOpenCodeConfig();
   }
 });
 runBootstrap();

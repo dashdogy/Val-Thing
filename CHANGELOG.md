@@ -7,6 +7,9 @@ All notable changes to Val OpenAI Local Bridge are documented here.
 - Made Windows protocol launches open a loopback-only, non-cacheable pairing
   page so the short-lived code remains visible even when the companion has no
   console window.
+- Made each bridge update refresh the OpenCode provider automatically after
+  the updated extension, companion, Val session, and model metadata are ready,
+  with persisted retry state across reloads.
 
 ## 0.1.12 - 2026-07-27
 
