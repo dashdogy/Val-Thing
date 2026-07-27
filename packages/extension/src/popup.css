@@ -368,6 +368,20 @@ header p {
   line-height: 1.35;
 }
 
+.usage-reset {
+  min-height: 28px;
+  margin-top: 9px;
+  border: 1px solid rgba(94, 123, 114, 0.22);
+  background: transparent;
+  color: #587069;
+  padding: 0 9px;
+  font-size: 9px;
+}
+
+.usage-reset:hover {
+  background: rgba(255, 255, 255, 0.55);
+}
+
 #pairing-panel {
   margin-top: 18px;
 }
@@ -500,10 +514,36 @@ button:disabled {
   background: rgba(255, 255, 255, 0.9);
 }
 
+.danger-action {
+  color: #9b4d47;
+}
+
 .api-key {
   min-height: 15px;
   margin-top: 7px;
   line-height: 1.35;
+}
+
+.network-config strong {
+  color: #376a5c;
+  font-size: 10px;
+}
+
+.network-config strong.lan {
+  color: #a15b25;
+}
+
+.network-config button {
+  width: 100%;
+  min-height: 32px;
+  margin-top: 8px;
+}
+
+.network-config p {
+  margin: 6px 1px 0;
+  color: #668078;
+  font-size: 9px;
+  line-height: 1.4;
 }
 
 .opencode-config button {
@@ -635,6 +675,15 @@ footer {
     color: #93aaa3;
   }
 
+  .usage-reset {
+    border-color: rgba(157, 194, 182, 0.18);
+    color: #a8beb7;
+  }
+
+  .usage-reset:hover {
+    background: rgba(255, 255, 255, 0.06);
+  }
+
   .usage-total strong {
     color: #d9f2e9;
   }
@@ -679,6 +728,22 @@ footer {
 
   .credential-action:hover {
     background: rgba(255, 255, 255, 0.1);
+  }
+
+  .danger-action {
+    color: #e5a49e;
+  }
+
+  .network-config strong {
+    color: #b9d8ce;
+  }
+
+  .network-config strong.lan {
+    color: #f0b278;
+  }
+
+  .network-config p {
+    color: #93aaa3;
   }
 
   .opencode-config p {

@@ -51,7 +51,7 @@ Complete `docs/LIVE_ACCEPTANCE.md` against the exact release build. In particula
 Pushing a version tag such as `v0.1.0` runs the release workflow. It rebuilds and verifies the artifacts, then creates the matching GitHub release. A friend needs Node.js 24 or newer and can install directly from the latest GitHub Release with one cross-platform command:
 
 ```shell
-npx --yes https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz
+npx --yes --allow-remote=all https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz
 ```
 
 The attached `install.mjs` remains available for offline or manual handoff.

@@ -22,6 +22,7 @@ import {
 
 const PROVIDER_ID = "val";
 const REASONING_LEVELS = [
+  "none",
   "minimal",
   "low",
   "medium",
@@ -33,7 +34,10 @@ const REASONING_LEVELS = [
 const REASONING_LEVEL_SET = new Set<string>(REASONING_LEVELS);
 const REASONING_SUMMARY_MODES = ["auto", "concise", "detailed"] as const;
 const REASONING_SUMMARY_MODE_SET = new Set<string>(REASONING_SUMMARY_MODES);
+const REASONING_MODES = ["standard", "pro"] as const;
+const REASONING_MODE_SET = new Set<string>(REASONING_MODES);
 const GPT_56_DEFAULT_REASONING_LEVELS = [
+  "none",
   "low",
   "medium",
   "high",
@@ -54,8 +58,17 @@ type CapabilitySource =
 export type ReasoningCapabilities = {
   levels: Array<(typeof REASONING_LEVELS)[number]>;
   summaryModes: Array<(typeof REASONING_SUMMARY_MODES)[number]>;
+  modes: Array<(typeof REASONING_MODES)[number]>;
   effortSource: CapabilitySource;
   summarySource: CapabilitySource;
+  modeSource: CapabilitySource;
+};
+
+export type ModelTokenLimits = {
+  context?: number;
+  output?: number;
+  contextSource: "val_metadata" | "gpt_5_6_family" | "none";
+  outputSource: "val_metadata" | "gpt_5_6_family" | "none";
 };
 
 export type ConfigureOpenCodeOptions = {
@@ -185,6 +198,36 @@ function collectReasoningSummaryModes(
   return modes;
 }
 
+function collectReasoningModes(
+  value: unknown,
+  path: string[] = [],
+  modes = new Set<string>(),
+  depth = 0,
+) {
+  if (depth > 8 || value === null || value === undefined) return modes;
+  const joinedPath = path.join(".");
+  const relevantPath =
+    /(?:reason|think)/i.test(joinedPath) && /mode/i.test(joinedPath);
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase();
+    if (relevantPath && REASONING_MODE_SET.has(normalized)) {
+      modes.add(normalized);
+    }
+    return modes;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectReasoningModes(item, path, modes, depth + 1);
+    }
+    return modes;
+  }
+  if (!isRecord(value)) return modes;
+  for (const [key, nested] of Object.entries(value)) {
+    collectReasoningModes(nested, [...path, key], modes, depth + 1);
+  }
+  return modes;
+}
+
 function hasCapabilityPath(
   value: unknown,
   expression: RegExp,
@@ -252,6 +295,7 @@ export function reasoningCapabilitiesForModel(
 ): ReasoningCapabilities {
   const levels = collectReasoningLevels(model);
   const summaryModes = collectReasoningSummaryModes(model);
+  const modes = collectReasoningModes(model);
   const isGpt56 = isOpenAIGpt56Model(model);
   const effortFlag = explicitCapabilityFlag(model, "reasoning");
   const summaryFlag = explicitCapabilityFlag(model, "summary");
@@ -261,6 +305,8 @@ export function reasoningCapabilitiesForModel(
   const hasSummaryMetadata =
     summaryModes.size > 0 ||
     hasCapabilityPath(model, /(?:reason|think).*summary/i);
+  const hasModeMetadata =
+    modes.size > 0 || hasCapabilityPath(model, /(?:reason|think).*mode/i);
 
   let effortSource: CapabilitySource = "none";
   if (effortFlag !== false) {
@@ -289,13 +335,30 @@ export function reasoningCapabilitiesForModel(
   }
   if (summaryFlag === false) summaryModes.clear();
 
+  let modeSource: CapabilitySource = "none";
+  if (effortFlag !== false) {
+    if (hasModeMetadata) {
+      modeSource = "val_metadata";
+    }
+    if (isGpt56 && !modes.has("standard")) {
+      modes.add("standard");
+      modeSource =
+        modeSource === "val_metadata"
+          ? "val_metadata_and_gpt_5_6_family"
+          : "gpt_5_6_family";
+    }
+  }
+  if (effortFlag === false) modes.clear();
+
   return {
     levels: REASONING_LEVELS.filter((level) => levels.has(level)),
     summaryModes: REASONING_SUMMARY_MODES.filter((mode) =>
       summaryModes.has(mode),
     ),
+    modes: REASONING_MODES.filter((mode) => modes.has(mode)),
     effortSource,
     summarySource,
+    modeSource,
   };
 }
 
@@ -307,6 +370,99 @@ export function isOpenAIGpt56Model(model: ValModel) {
   return GPT_56_MODEL_PATTERN.test(model.id);
 }
 
+const CONTEXT_LIMIT_KEYS = new Set([
+  "contextlength",
+  "contextlimit",
+  "contexttokens",
+  "contextwindow",
+  "maxcontextlength",
+  "maxcontexttokens",
+  "maxcontextwindow",
+]);
+const OUTPUT_LIMIT_KEYS = new Set([
+  "completiontokenlimit",
+  "maxcompletiontokens",
+  "maxoutputtokens",
+  "outputtokenlimit",
+  "outputtokens",
+]);
+
+function tokenLimit(value: unknown) {
+  const numeric =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^\d+$/.test(value.trim())
+        ? Number(value)
+        : Number.NaN;
+  return Number.isSafeInteger(numeric) && numeric > 0 && numeric <= 10_000_000
+    ? numeric
+    : undefined;
+}
+
+function collectTokenLimits(
+  value: unknown,
+  limits: { context: number[]; output: number[] },
+  path: string[] = [],
+  depth = 0,
+) {
+  if (depth > 8 || value === null || value === undefined) return;
+  const entries = Array.isArray(value)
+    ? value.map((nested, index) => [String(index), nested] as const)
+    : isRecord(value)
+      ? Object.entries(value)
+      : [];
+  for (const [key, nested] of entries) {
+    const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const parentPath = path.join(".").toLowerCase();
+    const numeric = tokenLimit(nested);
+    const contextKey =
+      CONTEXT_LIMIT_KEYS.has(normalizedKey) ||
+      (normalizedKey === "context" &&
+        /(?:limit|token|capabilit|model)/.test(parentPath));
+    const outputKey =
+      OUTPUT_LIMIT_KEYS.has(normalizedKey) ||
+      (normalizedKey === "output" &&
+        /(?:limit|token|capabilit|model)/.test(parentPath));
+    if (numeric !== undefined && contextKey) limits.context.push(numeric);
+    if (numeric !== undefined && outputKey) limits.output.push(numeric);
+    collectTokenLimits(nested, limits, [...path, key], depth + 1);
+  }
+}
+
+export function modelTokenLimits(model: ValModel): ModelTokenLimits {
+  const candidates = { context: [] as number[], output: [] as number[] };
+  collectTokenLimits(model, candidates);
+  const metadataContext =
+    candidates.context.length > 0 ? Math.max(...candidates.context) : undefined;
+  const metadataOutput =
+    candidates.output.length > 0 ? Math.max(...candidates.output) : undefined;
+  const isGpt56 = isOpenAIGpt56Model(model);
+  return {
+    ...(metadataContext !== undefined
+      ? { context: metadataContext }
+      : isGpt56
+        ? { context: GPT_56_CONTEXT_TOKENS }
+        : {}),
+    ...(metadataOutput !== undefined
+      ? { output: metadataOutput }
+      : isGpt56
+        ? { output: GPT_56_OUTPUT_TOKENS }
+        : {}),
+    contextSource:
+      metadataContext !== undefined
+        ? "val_metadata"
+        : isGpt56
+          ? "gpt_5_6_family"
+          : "none",
+    outputSource:
+      metadataOutput !== undefined
+        ? "val_metadata"
+        : isGpt56
+          ? "gpt_5_6_family"
+          : "none",
+  };
+}
+
 function modelFamily(model: ValModel) {
   const match = model.id.match(/gpt[-_]?(\d+(?:\.\d+)?)/i);
   return match?.[1] ? `gpt-${match[1]}` : undefined;
@@ -315,28 +471,39 @@ function modelFamily(model: ValModel) {
 function reasoningVariant(
   level: (typeof REASONING_LEVELS)[number],
   summarySupported: boolean,
+  mode?: (typeof REASONING_MODES)[number],
 ) {
   return {
     reasoningEffort: level,
-    ...(summarySupported || level === "max"
+    ...(summarySupported && level !== "none"
       ? { reasoningSummary: "auto" }
-      : {}),
+      : level === "max"
+        ? { reasoningSummary: "auto" }
+        : {}),
     ...(level === "max" ? { include: ["reasoning.encrypted_content"] } : {}),
-    reasoningContext: "all_turns",
+    ...(level === "none" ? {} : { reasoningContext: "all_turns" }),
+    ...(mode ? { reasoningMode: mode } : {}),
   };
 }
 
 export function openCodeModel(model: ValModel) {
   const reasoningCapabilities = reasoningCapabilitiesForModel(model);
   const reasoningLevels = reasoningCapabilities.levels;
+  const tokenLimits = modelTokenLimits(model);
   const family = modelFamily(model);
-  const isGpt56 = isOpenAIGpt56Model(model);
   const summarySupported =
     reasoningCapabilities.summaryModes.includes("auto") ||
     reasoningCapabilities.summaryModes.includes("detailed");
   const variants: Record<string, Record<string, unknown>> = {};
   for (const level of reasoningLevels) {
     variants[level] = reasoningVariant(level, summarySupported);
+    if (reasoningCapabilities.modes.includes("pro")) {
+      variants[`pro-${level}`] = reasoningVariant(
+        level,
+        summarySupported,
+        "pro",
+      );
+    }
     if (
       level === "max" &&
       reasoningCapabilities.summaryModes.includes("detailed")
@@ -352,11 +519,15 @@ export function openCodeModel(model: ValModel) {
   return {
     name: displayName(model),
     ...(family ? { family } : {}),
-    ...(isGpt56
+    ...(tokenLimits.context !== undefined || tokenLimits.output !== undefined
       ? {
           limit: {
-            context: GPT_56_CONTEXT_TOKENS,
-            output: GPT_56_OUTPUT_TOKENS,
+            ...(tokenLimits.context !== undefined
+              ? { context: tokenLimits.context }
+              : {}),
+            ...(tokenLimits.output !== undefined
+              ? { output: tokenLimits.output }
+              : {}),
           },
         }
       : {}),
@@ -378,21 +549,27 @@ export function openCodeModel(model: ValModel) {
 
 export function openAIModelCapabilities(model: ValModel) {
   const reasoning = reasoningCapabilitiesForModel(model);
-  const isGpt56 = isOpenAIGpt56Model(model);
+  const tokenLimits = modelTokenLimits(model);
   return {
-    ...(isGpt56
-      ? {
-          context_window: GPT_56_CONTEXT_TOKENS,
-          max_output_tokens: GPT_56_OUTPUT_TOKENS,
-        }
+    ...(tokenLimits.context !== undefined
+      ? { context_window: tokenLimits.context }
+      : {}),
+    ...(tokenLimits.output !== undefined
+      ? { max_output_tokens: tokenLimits.output }
       : {}),
     val_capabilities: {
       reasoning: reasoning.levels.length > 0,
       reasoning_efforts: reasoning.levels,
       reasoning_summaries: reasoning.summaryModes,
+      reasoning_modes: reasoning.modes,
+      token_limits: {
+        context: tokenLimits.contextSource,
+        output: tokenLimits.outputSource,
+      },
       evidence: {
         effort: reasoning.effortSource,
         summary: reasoning.summarySource,
+        mode: reasoning.modeSource,
       },
     },
   };

@@ -1,5 +1,6 @@
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const COMPANION_LAUNCH_URL = "val-openai-bridge://launch";
+export { collapseRepeatedJson } from "./json.js";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -78,10 +79,29 @@ export type RelayResponsesRequest = {
   kind: "responses";
   model: string;
   body: JsonObject;
+  headers?: Record<string, string>;
+};
+
+export type RelayHttpMethod =
+  "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD";
+
+export type RelayOpenAIHttpRequest = {
+  kind: "openai.http";
+  method: RelayHttpMethod;
+  path: string;
+  query?: string;
+  headers?: Record<string, string>;
+  body?: {
+    encoding: "base64";
+    data: string;
+  };
 };
 
 export type RelayRequest =
-  RelayModelsRequest | RelayCompletionRequest | RelayResponsesRequest;
+  | RelayModelsRequest
+  | RelayCompletionRequest
+  | RelayResponsesRequest
+  | RelayOpenAIHttpRequest;
 
 export type ValModel = {
   id: string;
@@ -99,6 +119,12 @@ export type ValRelayEvent =
   | { kind: "usage"; usage: JsonObject }
   | { kind: "status"; data: JsonObject }
   | { kind: "sse"; eventType: string; data: JsonObject }
+  | {
+      kind: "http.response";
+      status: number;
+      headers: Record<string, string>;
+    }
+  | { kind: "http.chunk"; encoding: "base64"; data: string }
   | { kind: "error"; error: RelayError };
 
 export type RelayAccepted = {
@@ -136,6 +162,7 @@ export type UsageReasoningStatus = "summary" | "hidden" | "unavailable";
 export type UsageStatsSnapshot = {
   startedAt: number;
   lastUpdatedAt: number;
+  resetAt?: number;
   requests: number;
   completedRequests: number;
   failedRequests: number;

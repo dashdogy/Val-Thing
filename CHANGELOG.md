@@ -2,6 +2,41 @@
 
 All notable changes to Val OpenAI Local Bridge are documented here.
 
+## 0.1.12 - 2026-07-27
+
+- Closed relay cancellation races during model lookup, Val session setup, chat
+  creation, and bridge reconnects so abandoned prompts cannot be accepted
+  after cancellation.
+- Added popup controls to rotate the client API key, reset durable usage
+  totals, and switch explicitly between device-only and trusted-LAN access.
+- Added an optional exact client-IP allowlist for LAN deployments and exposed
+  only the network mode and allowlist status through `/healthz`.
+- Made usage resets generation-aware so delayed extension synchronization
+  cannot restore stale totals after a reset.
+- Made the installer update transaction fully reversible across the version,
+  extension, launcher, metadata, and reload-marker swaps, with injected-fault
+  rollback coverage.
+- Replaced quadratic repeated-tool-argument cleanup with one shared linear
+  parser and added large-payload coverage.
+- Preferred context and output limits reported by Val model metadata while
+  retaining the documented GPT-5.6 values as compatibility fallbacks.
+- Added OpenAI SDK v5/v6 and current OpenCode compatibility checks, CodeQL,
+  Dependabot, a security-reporting policy, and corrected privacy and release
+  documentation.
+- Added an authenticated, credential-isolated HTTP relay for OpenAI SDK v6
+  resources exposed by Val, preserving JSON, SSE, pagination, multipart
+  uploads, binary downloads, safe headers, upstream errors, and cancellation.
+- Added official SDK v6 contracts for Responses background operations,
+  retrieval streaming, input token counts, input items, compaction, reusable
+  prompts, structured parsing, stream helpers, automatic tool execution, model
+  retrieval, and file operations.
+- Kept durable token, reasoning-token, and cost statistics working for
+  advanced Chat Completions and Responses requests that use the generic SDK
+  relay, without persisting request or response content.
+- Forwarded GPT-5.6 pro reasoning mode, explicit prompt-cache options,
+  persisted reasoning context, text verbosity, and current reasoning efforts;
+  OpenCode advertises pro variants only when Val metadata exposes them.
+
 ## 0.1.11 - 2026-07-25
 
 - Raised the default and maximum companion concurrency to 16 simultaneous
@@ -34,6 +69,32 @@ All notable changes to Val OpenAI Local Bridge are documented here.
 - Kept strict extension-origin pairing and hardened SSE parsing, cancellation,
   terminal-event validation, serialized continuation mappings, and sanitized
   usage accounting.
+
+## 0.1.8 - 2026-07-24
+
+- Added periodic update checks, a popup update action, sanitized bounded
+  diagnostics, and a live OpenCode Responses/tool-use compatibility probe.
+- Added detailed reasoning disclosure state and token-usage status without
+  fabricating hidden summaries.
+- Hardened update metadata validation and clean extension reload behavior.
+
+## 0.1.6 - 2026-07-24
+
+- Expanded Val reasoning extraction across nested content, status, and event
+  aliases while filtering placeholder text such as `Thinking`.
+- Kept reasoning parts out of final answer text and added regression coverage
+  for streamed and snapshot forms.
+
+## 0.1.5 - 2026-07-24
+
+- Updated the one-line installer command for npm 12 remote-package safety and
+  verified that exact command in portable release tests.
+
+## 0.1.4 - 2026-07-24
+
+- Forwarded Responses reasoning-summary settings and requested summaries for
+  OpenCode reasoning variants.
+- Fixed portable bundling of `jsonc-parser`.
 
 ## 0.1.3 - 2026-07-24
 

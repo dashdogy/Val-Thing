@@ -97,3 +97,21 @@ test("rejects malformed updates and preserves newer non-empty totals", async (t)
 
   assert.deepEqual(store.snapshot(), current);
 });
+
+test("resets durable usage totals without allowing the old snapshot back", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "val-bridge-usage-reset-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  const store = await UsageStatsStore.open(directory);
+  const previous = usageStats();
+  assert.equal(store.update(previous), true);
+  const reset = store.reset(1_000);
+  await store.flush();
+  assert.equal(reset.requests, 0);
+  assert.equal(reset.totalTokens, 0);
+  assert.equal(reset.startedAt, 1_000);
+
+  assert.equal(store.update(previous), true);
+  assert.deepEqual(store.snapshot(), reset);
+  assert.deepEqual((await UsageStatsStore.open(directory)).snapshot(), reset);
+});

@@ -1,5 +1,6 @@
 import {
   COMPANION_LAUNCH_URL,
+  collapseRepeatedJson,
   PROTOCOL_VERSION,
   type ExtensionStatus,
   type ExtensionToServerMessage,
@@ -9,6 +10,7 @@ import {
   type PairResponse,
   type RelayCompletionRequest,
   type RelayError,
+  type RelayOpenAIHttpRequest,
   type RelayRequest,
   type RelayResponsesRequest,
   type ServerToExtensionMessage,
@@ -30,6 +32,21 @@ import {
   type BuiltHistory,
   type ParsedClientToolCall,
 } from "./relay-utils.js";
+import {
+  RelayLifecycleRegistry,
+  throwIfRelayCancelled,
+} from "./relay-lifecycle.js";
+import {
+  base64ToBytes,
+  bytesToBase64,
+  openAIHttpRequestHeaders,
+  openAIHttpResponseHeaders,
+  valOpenAIHttpUrl,
+} from "./openai-http-relay.js";
+import {
+  openAIHttpGeneration,
+  OpenAIHttpUsageCapture,
+} from "./openai-usage-capture.js";
 import { SseParser, type ParsedSseEvent } from "./sse-parser.js";
 import {
   createSessionUsageStats,
@@ -66,6 +83,8 @@ type PopupStatus = ExtensionStatus & {
   bridgeConnected: boolean;
   bridgePaired: boolean;
   bridgeUrl: string;
+  networkScope: "unknown" | "loopback" | "lan";
+  clientIpAllowlist: boolean;
   clientApiKey?: string;
   update: ExtensionUpdateStatus;
   stats: SessionUsageStats & { activeRequests: number };
@@ -105,12 +124,14 @@ let valSocketToken = "";
 let bridgeSocket: WebSocket | null = null;
 let bridgeAuthenticated = false;
 let clientApiKey = "";
+let companionNetworkScope: PopupStatus["networkScope"] = "unknown";
+let companionClientIpAllowlist = false;
 let bridgeReconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let bridgeReconnectDelay = 1_000;
 let modelCache: { expiresAt: number; models: ValModel[] } | null = null;
 const pendingByRequest = new Map<string, PendingCompletion>();
 const pendingByMessage = new Map<string, PendingCompletion>();
-const pendingResponses = new Map<string, AbortController>();
+const relayLifecycles = new RelayLifecycleRegistry();
 let usageStats = createSessionUsageStats();
 let usageStatsWrite: Promise<void> = Promise.resolve();
 let extensionUpdateStatus = createUpdateStatus(EXTENSION_VERSION);
@@ -241,21 +262,6 @@ function mergeArgumentFragment(tool: MutableToolCall, incoming: string) {
   }
 }
 
-function collapseRepeatedJson(value: string) {
-  for (let length = 1; length <= value.length / 2; length += 1) {
-    if (value.length % length !== 0) continue;
-    const candidate = value.slice(0, length);
-    if (candidate.repeat(value.length / length) !== value) continue;
-    try {
-      JSON.parse(candidate);
-      return candidate;
-    } catch {
-      // Continue looking for a larger valid JSON period.
-    }
-  }
-  return value;
-}
-
 function updateStatus(patch: Partial<ExtensionStatus>) {
   extensionStatus = { ...extensionStatus, ...patch, extensionConnected: true };
   updateBadge();
@@ -289,9 +295,10 @@ function sendBridge(message: ExtensionToServerMessage) {
   }
 }
 
-function abortPendingResponses() {
-  for (const controller of pendingResponses.values()) {
-    controller.abort();
+function cancelActiveRelays() {
+  relayLifecycles.cancelAll();
+  for (const pending of [...pendingByRequest.values()]) {
+    if (!pending.finished) void cancelRelay(pending.requestId);
   }
 }
 
@@ -554,16 +561,18 @@ async function connectBridge() {
   }
   const { secret, url } = await getBridgeSettings();
   if (!secret) {
-    abortPendingResponses();
+    cancelActiveRelays();
     const socket = bridgeSocket;
     bridgeSocket = null;
     socket?.close();
     bridgeAuthenticated = false;
     clientApiKey = "";
+    companionNetworkScope = "unknown";
+    companionClientIpAllowlist = false;
     updateBadge();
     return;
   }
-  abortPendingResponses();
+  cancelActiveRelays();
   const previousSocket = bridgeSocket;
   bridgeSocket = null;
   previousSocket?.close();
@@ -575,11 +584,24 @@ async function connectBridge() {
       signal: AbortSignal.timeout(1_500),
     });
     if (!response.ok) {
+      companionNetworkScope = "unknown";
+      companionClientIpAllowlist = false;
       updateBadge();
       scheduleBridgeReconnect();
       return;
     }
+    const health = (await response.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >;
+    companionNetworkScope =
+      health.network_scope === "lan" || health.network_scope === "loopback"
+        ? health.network_scope
+        : "unknown";
+    companionClientIpAllowlist = health.client_ip_allowlist === true;
   } catch {
+    companionNetworkScope = "unknown";
+    companionClientIpAllowlist = false;
     updateBadge();
     scheduleBridgeReconnect();
     return;
@@ -611,9 +633,11 @@ async function connectBridge() {
   });
   socket.addEventListener("close", () => {
     if (bridgeSocket !== socket) return;
-    abortPendingResponses();
+    cancelActiveRelays();
     bridgeAuthenticated = false;
     clientApiKey = "";
+    companionNetworkScope = "unknown";
+    companionClientIpAllowlist = false;
     updateBadge();
     scheduleBridgeReconnect();
   });
@@ -639,7 +663,7 @@ function reloadExtensionCleanly() {
     clearTimeout(bridgeReconnectTimer);
     bridgeReconnectTimer = undefined;
   }
-  abortPendingResponses();
+  cancelActiveRelays();
   const socket = bridgeSocket;
   bridgeSocket = null;
   socket?.close();
@@ -693,26 +717,36 @@ async function handleBridgeMessage(message: ServerToExtensionMessage) {
 
 async function handleRelayRequest(id: string, request: RelayRequest) {
   try {
-    if (request.kind === "models") {
-      const models = await getModels();
-      sendBridge({ type: "relay.done", id, result: { models } });
-      return;
-    }
-    if (request.kind === "responses") {
-      await startResponses(id, request);
-      return;
-    }
-    await startCompletion(id, request);
+    await relayLifecycles.run(id, async (signal) => {
+      if (request.kind === "models") {
+        const models = await getModels();
+        throwIfRelayCancelled(signal);
+        sendBridge({ type: "relay.done", id, result: { models } });
+        return;
+      }
+      if (request.kind === "openai.http") {
+        await startOpenAIHttp(id, request, signal);
+        return;
+      }
+      if (request.kind === "responses") {
+        await startResponses(id, request, signal);
+        return;
+      }
+      await startCompletion(id, request, signal);
+    });
   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") return;
     sendBridge({ type: "relay.error", id, error: relayError(error) });
   }
 }
 
-async function startResponses(
+async function startOpenAIHttp(
   requestId: string,
-  request: RelayResponsesRequest,
+  request: RelayOpenAIHttpRequest,
+  signal: AbortSignal,
 ) {
   const token = await ensureToken();
+  throwIfRelayCancelled(signal);
   if (!token) {
     sendBridge({
       type: "relay.error",
@@ -726,8 +760,128 @@ async function startResponses(
     return;
   }
 
-  const controller = new AbortController();
-  pendingResponses.set(requestId, controller);
+  const url = valOpenAIHttpUrl(VAL_ORIGIN, request.path, request.query ?? "");
+  const headers = openAIHttpRequestHeaders(request.headers, token);
+  const canHaveBody = request.method !== "GET" && request.method !== "HEAD";
+  const body =
+    canHaveBody && request.body?.encoding === "base64"
+      ? base64ToBytes(request.body.data)
+      : undefined;
+  const generation = openAIHttpGeneration(request);
+  let statsSettled = false;
+  let usageCapture: OpenAIHttpUsageCapture | undefined;
+  const settleHttpRequest = (
+    outcome: UsageOutcome,
+    usage?: Record<string, unknown>,
+    reasoningSummaryAvailable = false,
+  ) => {
+    if (!generation || statsSettled) return;
+    statsSettled = true;
+    usageStats = settleUsageRequest(
+      usageStats,
+      usage,
+      outcome,
+      Date.now(),
+      generation.model,
+      { reasoningSummaryAvailable },
+    );
+    persistUsageStats();
+  };
+  if (generation) recordPendingRequest();
+
+  sendBridge({
+    type: "relay.accepted",
+    id: requestId,
+    accepted: {},
+  });
+
+  try {
+    const response = await fetch(url, {
+      method: request.method,
+      headers,
+      ...(body ? { body } : {}),
+      redirect: "manual",
+      signal,
+    });
+    if (response.status === 401) await setSessionToken("");
+    usageCapture = generation
+      ? new OpenAIHttpUsageCapture(
+          response.headers.get("content-type"),
+          response.status,
+          generation.stream,
+        )
+      : undefined;
+
+    sendBridge({
+      type: "relay.event",
+      id: requestId,
+      event: {
+        kind: "http.response",
+        status: response.status,
+        headers: openAIHttpResponseHeaders(response.headers),
+      },
+    });
+
+    const reader = response.body?.getReader();
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        throwIfRelayCancelled(signal);
+        if (value.length > 0) {
+          usageCapture?.push(value);
+          sendBridge({
+            type: "relay.event",
+            id: requestId,
+            event: {
+              kind: "http.chunk",
+              encoding: "base64",
+              data: bytesToBase64(value),
+            },
+          });
+        }
+      }
+    }
+    const captured = usageCapture?.finish();
+    if (captured) {
+      settleHttpRequest(
+        captured.outcome,
+        captured.usage,
+        captured.reasoningSummaryAvailable,
+      );
+    } else {
+      settleHttpRequest(response.ok ? "completed" : "failed");
+    }
+    sendBridge({ type: "relay.done", id: requestId, result: {} });
+  } catch (error) {
+    const cancelled =
+      (error instanceof DOMException && error.name === "AbortError") ||
+      signal.aborted;
+    settleHttpRequest(cancelled ? "cancelled" : "failed");
+    throw error;
+  }
+}
+
+async function startResponses(
+  requestId: string,
+  request: RelayResponsesRequest,
+  signal: AbortSignal,
+) {
+  const token = await ensureToken();
+  throwIfRelayCancelled(signal);
+  if (!token) {
+    sendBridge({
+      type: "relay.error",
+      id: requestId,
+      error: {
+        code: "val_session_unavailable",
+        message: "Open and sign in to Val.",
+        status: 503,
+      },
+    });
+    return;
+  }
+
   recordPendingRequest();
   let usage: Record<string, unknown> | undefined;
   let reasoningSummaryAvailable = false;
@@ -805,12 +959,10 @@ async function startResponses(
   });
 
   const isStreaming = request.body.stream === true;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${token}`,
-  };
+  const headers = openAIHttpRequestHeaders(request.headers, token);
+  headers["content-type"] = "application/json";
   if (isStreaming) {
-    headers.Accept = "text/event-stream";
+    headers.accept = "text/event-stream";
   }
 
   try {
@@ -818,7 +970,7 @@ async function startResponses(
       method: "POST",
       headers,
       body: JSON.stringify(request.body),
-      signal: controller.signal,
+      signal,
     });
 
     if (!response.ok) {
@@ -954,7 +1106,7 @@ async function startResponses(
       error: relayError(error),
     });
   } finally {
-    pendingResponses.delete(requestId);
+    // RelayLifecycleRegistry owns signal cleanup.
   }
 }
 
@@ -970,8 +1122,10 @@ function bridgeOwned(chat: Record<string, unknown>) {
 async function startCompletion(
   requestId: string,
   request: RelayCompletionRequest,
+  signal: AbortSignal,
 ) {
   const socket = await ensureValSocket();
+  throwIfRelayCancelled(signal);
   if (!socket.id) {
     throw {
       code: "val_socket_unavailable",
@@ -981,6 +1135,7 @@ async function startCompletion(
   }
 
   const models = await getModels();
+  throwIfRelayCancelled(signal);
   const modelItem = models.find((model) => model.id === request.model);
   if (!modelItem) {
     throw {
@@ -1010,6 +1165,7 @@ async function startCompletion(
     const record = await valFetch(
       `/api/v1/chats/${encodeURIComponent(storedPersistence.chatId)}`,
     );
+    throwIfRelayCancelled(signal);
     existingChat =
       record.chat && typeof record.chat === "object"
         ? (record.chat as Record<string, unknown>)
@@ -1054,10 +1210,12 @@ async function startCompletion(
   };
 
   if (storedPersistence && !storedPersistence.chatId) {
+    throwIfRelayCancelled(signal);
     const created = await valFetch("/api/v1/chats/new", {
       method: "POST",
       body: JSON.stringify({ chat: chatObject }),
     });
+    throwIfRelayCancelled(signal);
     const createdId =
       typeof created.id === "string"
         ? created.id
@@ -1076,12 +1234,15 @@ async function startCompletion(
     chatId = createdId;
     exposedChatId = createdId;
   } else if (stored) {
+    throwIfRelayCancelled(signal);
     await valFetch(`/api/v1/chats/${encodeURIComponent(chatId)}`, {
       method: "POST",
       body: JSON.stringify({ chat: chatObject }),
     });
+    throwIfRelayCancelled(signal);
   }
 
+  throwIfRelayCancelled(signal);
   const pending: PendingCompletion = {
     requestId,
     request,
@@ -1787,6 +1948,7 @@ function cleanupPending(pending: PendingCompletion) {
 }
 
 async function cancelRelay(requestId: string) {
+  relayLifecycles.cancel(requestId);
   const pending = pendingByRequest.get(requestId);
   if (pending && !pending.finished) {
     pending.cancelRequested = true;
@@ -1797,10 +1959,6 @@ async function cancelRelay(requestId: string) {
       cleanupPending(pending);
     }
     return;
-  }
-  const responsesAbort = pendingResponses.get(requestId);
-  if (responsesAbort) {
-    responsesAbort.abort();
   }
 }
 
@@ -1927,6 +2085,104 @@ async function configureOpenCode() {
     modelsConfigured: body.models_configured,
     updated: body.updated,
     backupCreated: body.backup_created === true,
+  };
+}
+
+async function rotateClientApiKey() {
+  const { secret, url } = await getBridgeSettings();
+  if (!secret) {
+    throw new Error("Pair the extension with the companion first.");
+  }
+  const response = await fetch(`${url}/bridge/security/rotate-client-key`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${secret}` },
+    cache: "no-store",
+    signal: AbortSignal.timeout(15_000),
+  });
+  const body = (await response.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  if (
+    !response.ok ||
+    body.rotated !== true ||
+    typeof body.client_api_key !== "string" ||
+    !body.client_api_key.startsWith("val-local-")
+  ) {
+    throw new Error(
+      updateErrorMessage(body, "The companion could not rotate the API key."),
+    );
+  }
+  clientApiKey = body.client_api_key;
+  return { clientApiKey };
+}
+
+async function resetUsageStats() {
+  const { secret, url } = await getBridgeSettings();
+  if (!secret) {
+    throw new Error("Pair the extension with the companion first.");
+  }
+  const response = await fetch(`${url}/bridge/usage/reset`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${secret}` },
+    cache: "no-store",
+    signal: AbortSignal.timeout(15_000),
+  });
+  const body = (await response.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  if (!response.ok || body.reset !== true || !body.stats) {
+    throw new Error(
+      updateErrorMessage(body, "The companion could not reset usage totals."),
+    );
+  }
+  usageStats = restoreSessionUsageStats(body.stats);
+  persistUsageStats();
+  return { reset: true };
+}
+
+async function setCompanionNetworkScope(scope: "loopback" | "lan") {
+  const { secret, url } = await getBridgeSettings();
+  if (!secret) {
+    throw new Error("Pair the extension with the companion first.");
+  }
+  const response = await fetch(`${url}/bridge/network-scope`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${secret}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ scope }),
+    cache: "no-store",
+    signal: AbortSignal.timeout(15_000),
+  });
+  const body = (await response.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  if (!response.ok || body.accepted !== true || body.network_scope !== scope) {
+    throw new Error(
+      updateErrorMessage(
+        body,
+        "The companion could not change network access.",
+      ),
+    );
+  }
+  if (body.restart_scheduled === true) {
+    await waitForCompanionToStop(url);
+    await chrome.tabs.create({
+      url: COMPANION_LAUNCH_URL,
+      active: true,
+    });
+    return { scope, restarting: true };
+  }
+  companionNetworkScope =
+    body.restart_required === true ? companionNetworkScope : scope;
+  return {
+    scope,
+    restarting: false,
+    restartRequired: body.restart_required === true,
   };
 }
 
@@ -2099,13 +2355,18 @@ async function popupStatus(): Promise<PopupStatus> {
     bridgeConnected: bridgeAuthenticated,
     bridgePaired: Boolean(settings.secret),
     bridgeUrl: settings.url,
+    networkScope: companionNetworkScope,
+    clientIpAllowlist: companionClientIpAllowlist,
     ...(clientApiKey ? { clientApiKey } : {}),
     update: extensionUpdateStatus,
     stats: {
       ...usageStats,
-      activeRequests:
-        [...pendingByRequest.values()].filter((pending) => !pending.finished)
-          .length + pendingResponses.size,
+      activeRequests: new Set([
+        ...relayLifecycles.ids(),
+        ...[...pendingByRequest.values()]
+          .filter((pending) => !pending.finished)
+          .map((pending) => pending.requestId),
+      ]).size,
     },
   };
 }
@@ -2166,11 +2427,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       socket?.close();
       bridgeAuthenticated = false;
       clientApiKey = "";
+      companionNetworkScope = "unknown";
+      companionClientIpAllowlist = false;
       updateBadge();
       return { ok: true };
     }
     if (message?.type === "POPUP_CONFIGURE_OPENCODE") {
       return { ok: true, result: await configureOpenCode() };
+    }
+    if (message?.type === "POPUP_ROTATE_API_KEY") {
+      return { ok: true, result: await rotateClientApiKey() };
+    }
+    if (message?.type === "POPUP_RESET_USAGE") {
+      return { ok: true, result: await resetUsageStats() };
+    }
+    if (message?.type === "POPUP_SET_NETWORK_SCOPE") {
+      const scope = message.scope;
+      if (scope !== "loopback" && scope !== "lan") {
+        throw new Error("Network scope must be loopback or lan.");
+      }
+      return {
+        ok: true,
+        result: await setCompanionNetworkScope(scope),
+      };
     }
     if (message?.type === "POPUP_APPLY_UPDATE") {
       return { ok: true, result: await applyAvailableUpdate() };
