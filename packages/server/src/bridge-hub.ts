@@ -246,7 +246,11 @@ export class BridgeHub {
       case "relay.event": {
         const pending = this.pending.get(message.id);
         if (!pending) break;
-        if (containsReasoningChunk(message.event)) {
+        if (
+          containsReasoningChunk(message.event) ||
+          message.event.kind === "http.response" ||
+          message.event.kind === "http.chunk"
+        ) {
           this.armTimeout(message.id, pending);
         }
         try {

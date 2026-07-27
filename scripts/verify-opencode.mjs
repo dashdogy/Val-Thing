@@ -478,11 +478,17 @@ const config = {
           reasoning: true,
           tool_call: true,
           variants: {
-            "max-detailed": {
+            "pro-max": {
               reasoningEffort: "max",
+              reasoningMode: "pro",
               reasoningSummary: "detailed",
               include: ["reasoning.encrypted_content"],
               reasoningContext: "all_turns",
+              promptCacheOptions: {
+                mode: "explicit",
+                ttl: "30m",
+              },
+              textVerbosity: "high",
             },
           },
           modalities: {
@@ -509,7 +515,7 @@ try {
       "--model",
       "val-acceptance/tool-model",
       "--variant",
-      "max-detailed",
+      "pro-max",
       "--dir",
       workspace,
       "Use the read tool to read probe.txt, then report completion.",
@@ -558,6 +564,15 @@ try {
     hasToolOutput: JSON.stringify(request).includes("function_call_output"),
   }));
   for (const [index, request] of relayRequests.entries()) {
+    if (
+      request?.reasoning?.effort !== "max" ||
+      request?.reasoning?.mode !== "pro" ||
+      request?.reasoning?.summary !== "detailed"
+    ) {
+      throw new Error(
+        `OpenCode request ${index + 1} did not preserve GPT-5.6 pro reasoning options: ${JSON.stringify(requestSummary)}.`,
+      );
+    }
     if (request?.reasoning?.context !== "all_turns") {
       throw new Error(
         `OpenCode request ${index + 1} did not preserve reasoning.context=all_turns: ${JSON.stringify(requestSummary)}.`,
@@ -566,6 +581,19 @@ try {
     if (!request?.include?.includes("reasoning.encrypted_content")) {
       throw new Error(
         `OpenCode request ${index + 1} did not request encrypted reasoning content.`,
+      );
+    }
+    if (
+      request?.prompt_cache_options?.mode !== "explicit" ||
+      request?.prompt_cache_options?.ttl !== "30m"
+    ) {
+      throw new Error(
+        `OpenCode request ${index + 1} did not preserve explicit prompt caching: ${JSON.stringify(requestSummary)}.`,
+      );
+    }
+    if (request?.text?.verbosity !== "high") {
+      throw new Error(
+        `OpenCode request ${index + 1} did not preserve text.verbosity=high: ${JSON.stringify(requestSummary)}.`,
       );
     }
   }
@@ -594,7 +622,7 @@ try {
   );
   console.log(`Binary: ${openCodeBinary}`);
   console.log(
-    "Verified: Responses API, read tool round-trip, reasoning summary, encrypted reasoning continuation.",
+    "Verified: Responses API, pro reasoning, explicit cache options, verbosity, read tool round-trip, reasoning summary, encrypted reasoning continuation.",
   );
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });

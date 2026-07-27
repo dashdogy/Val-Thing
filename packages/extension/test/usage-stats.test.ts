@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   createSessionUsageStats,
   estimateOpenAICostNanodollars,
+  GPT_56_PRICING_SNAPSHOT_DATE,
   newerUsageStats,
   recordUsageRequest,
   reasoningTokensFromUsage,
@@ -60,6 +61,25 @@ test("extracts usage and reasoning summaries from Responses payloads", () => {
     usage,
     reasoningSummaryAvailable: false,
   });
+  assert.deepEqual(
+    responseUsageDetails({
+      choices: [
+        {
+          delta: {
+            reasoning_content: "Checked the tool constraints.",
+          },
+        },
+      ],
+    }),
+    { usage: undefined, reasoningSummaryAvailable: true },
+  );
+  assert.deepEqual(
+    responseUsageDetails({
+      type: "response.reasoning_summary_text.delta",
+      delta: "Checking the request.",
+    }),
+    { usage: undefined, reasoningSummaryAvailable: true },
+  );
 });
 
 test("tracks metered requests and outcomes without storing content", () => {
@@ -153,7 +173,8 @@ test("tracks genuine summaries separately from hidden reasoning tokens", () => {
   assert.equal(stats.lastReasoningTokensReported, true);
 });
 
-test("estimates current GPT-5.6 API-equivalent token costs", () => {
+test("estimates the bundled GPT-5.6 pricing snapshot", () => {
+  assert.equal(GPT_56_PRICING_SNAPSHOT_DATE, "2026-07-24");
   assert.equal(
     estimateOpenAICostNanodollars("openai-gpt-5.6-sol", {
       prompt_tokens: 9,
@@ -228,4 +249,22 @@ test("restores durable totals without letting a fresh session erase them", () =>
     newerUsageStats(newerLocal, equallyRecentPersisted),
     equallyRecentPersisted,
   );
+});
+
+test("a newer reset generation cannot be replaced by stale non-empty totals", () => {
+  const stale = {
+    ...createSessionUsageStats(100),
+    lastUpdatedAt: 200,
+    requests: 2,
+    completedRequests: 2,
+    meteredRequests: 2,
+    totalTokens: 15,
+  };
+  const reset = {
+    ...createSessionUsageStats(1_000),
+    resetAt: 1_000,
+  };
+
+  assert.deepEqual(newerUsageStats(stale, reset), reset);
+  assert.deepEqual(newerUsageStats(reset, stale), reset);
 });

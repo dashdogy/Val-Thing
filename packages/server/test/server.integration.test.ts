@@ -6,13 +6,16 @@ import test from "node:test";
 import type {
   ExtensionToServerMessage,
   RelayCompletionRequest,
+  RelayOpenAIHttpRequest,
   RelayResponsesRequest,
   ServerToExtensionMessage,
   UsageStatsSnapshot,
 } from "@val-bridge/protocol";
 import { PROTOCOL_VERSION } from "@val-bridge/protocol";
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
+import { zodFunction, zodTextFormat } from "openai/helpers/zod";
 import WebSocket from "ws";
+import { z } from "zod";
 import { ValBridgeServer } from "../src/server.js";
 import { UpdateChecker } from "../src/update-checker.js";
 
@@ -38,6 +41,7 @@ class FakeValExtension {
   clientApiKey = "";
   readonly relayRequests: RelayCompletionRequest[] = [];
   readonly responsesRequests: RelayResponsesRequest[] = [];
+  readonly httpRequests: RelayOpenAIHttpRequest[] = [];
   readonly cancelledRequestIds: string[] = [];
   readonly heldRequestIds: string[] = [];
   authenticatedUsageStats?: UsageStatsSnapshot;
@@ -171,6 +175,11 @@ class FakeValExtension {
           ],
         },
       });
+      return;
+    }
+    if (message.request.kind === "openai.http") {
+      this.httpRequests.push(message.request);
+      this.handleHttpRequest(message.id, message.request);
       return;
     }
     if (message.request.kind === "responses") {
@@ -563,13 +572,36 @@ class FakeValExtension {
           },
         },
       });
+      this.send({
+        type: "relay.event",
+        id: message.id,
+        event: {
+          kind: "sse",
+          eventType: "response.content_part.added",
+          data: {
+            type: "response.content_part.added",
+            item_id: "msg_testoutput",
+            output_index: 0,
+            content_index: 0,
+            part: {
+              type: "output_text",
+              text: "",
+              annotations: [],
+              logprobs: [],
+            },
+            sequence_number: 3,
+          },
+        },
+      });
       const isStream =
         requestText.includes("RESPONSES_STREAM") ||
         (!requestText.includes("STORE_THIS") &&
           !requestText.includes("CONTINUE"));
       const responseContent = requestText.includes("CONTINUE")
         ? "continued-ok"
-        : "bridge-ok";
+        : requestText.includes("SDK_PARSE")
+          ? '{"answer":"parsed-ok"}'
+          : "bridge-ok";
       if (isStream) {
         this.send({
           type: "relay.event",
@@ -583,7 +615,7 @@ class FakeValExtension {
               output_index: 0,
               content_index: 0,
               delta: responseContent.slice(0, 6),
-              sequence_number: 3,
+              sequence_number: 4,
             },
           },
         });
@@ -599,7 +631,7 @@ class FakeValExtension {
               output_index: 0,
               content_index: 0,
               delta: responseContent.slice(6),
-              sequence_number: 4,
+              sequence_number: 5,
             },
           },
         });
@@ -612,24 +644,27 @@ class FakeValExtension {
           eventType: "response.completed",
           data: {
             type: "response.completed",
-            id: nativeId,
-            object: "response",
-            status: "completed",
-            model: relay.model,
-            output: [
-              {
-                id: "msg_testoutput",
-                type: "message",
-                status: "completed",
-                role: "assistant",
-                content: [{ type: "output_text", text: responseContent }],
+            response: {
+              id: nativeId,
+              object: "response",
+              status: "completed",
+              model: relay.model,
+              output: [
+                {
+                  id: "msg_testoutput",
+                  type: "message",
+                  status: "completed",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: responseContent }],
+                },
+              ],
+              usage: {
+                input_tokens: 15,
+                output_tokens: 20,
+                total_tokens: 35,
               },
-            ],
-            usage: {
-              input_tokens: 15,
-              output_tokens: 20,
-              total_tokens: 35,
             },
+            sequence_number: 6,
           },
         },
       });
@@ -727,7 +762,11 @@ class FakeValExtension {
       this.emitHiddenReasoning(message.id, chatId);
       return;
     }
-    if (requestText.includes("CALL_TOOL")) {
+    if (
+      requestText.includes("CALL_TOOL") ||
+      (requestText.includes("SDK_RUN_TOOL") &&
+        !requestText.includes('"role":"tool"'))
+    ) {
       this.emitToolCall(message.id, chatId);
       return;
     }
@@ -770,6 +809,380 @@ class FakeValExtension {
         },
       },
     });
+  }
+
+  private handleHttpRequest(
+    requestId: string,
+    request: RelayOpenAIHttpRequest,
+  ) {
+    const body = request.body
+      ? Buffer.from(request.body.data, request.body.encoding)
+      : Buffer.alloc(0);
+    const respond = (
+      status: number,
+      value: unknown,
+      headers: Record<string, string> = {},
+    ) => {
+      const bytes = Buffer.isBuffer(value)
+        ? value
+        : Buffer.from(
+            typeof value === "string" ? value : JSON.stringify(value),
+            "utf8",
+          );
+      this.send({
+        type: "relay.event",
+        id: requestId,
+        event: {
+          kind: "http.response",
+          status,
+          headers: {
+            "content-type": Buffer.isBuffer(value)
+              ? "application/octet-stream"
+              : "application/json",
+            "x-request-id": `req_${requestId}`,
+            ...headers,
+          },
+        },
+      });
+      const midpoint = Math.max(1, Math.floor(bytes.length / 2));
+      for (const chunk of [
+        bytes.subarray(0, midpoint),
+        bytes.subarray(midpoint),
+      ]) {
+        if (chunk.length === 0) continue;
+        this.send({
+          type: "relay.event",
+          id: requestId,
+          event: {
+            kind: "http.chunk",
+            encoding: "base64",
+            data: chunk.toString("base64"),
+          },
+        });
+      }
+      this.send({ type: "relay.done", id: requestId, result: {} });
+    };
+    const error = (status: number, code: string, message: string) =>
+      respond(status, {
+        error: {
+          code,
+          message,
+          param: null,
+          type: "invalid_request_error",
+        },
+      });
+    const responseObject = (
+      id: string,
+      status: "queued" | "completed" | "cancelled",
+      outputText = "",
+    ) => ({
+      id,
+      object: "response",
+      created_at: 1_700_000_000,
+      status,
+      background: true,
+      error: null,
+      incomplete_details: null,
+      instructions: null,
+      max_output_tokens: null,
+      max_tool_calls: null,
+      model: this.modelId,
+      output:
+        status === "completed"
+          ? [
+              {
+                id: "msg_background",
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [
+                  {
+                    type: "output_text",
+                    text: outputText,
+                    annotations: [],
+                    logprobs: [],
+                  },
+                ],
+              },
+            ]
+          : [],
+      parallel_tool_calls: true,
+      previous_response_id: null,
+      prompt_cache_key: null,
+      prompt_cache_retention: null,
+      reasoning: { effort: null, summary: null },
+      safety_identifier: null,
+      service_tier: "default",
+      store: true,
+      temperature: 1,
+      text: { format: { type: "text" }, verbosity: "medium" },
+      tool_choice: "auto",
+      tools: [],
+      top_logprobs: 0,
+      top_p: 1,
+      truncation: "disabled",
+      usage:
+        status === "completed"
+          ? {
+              input_tokens: 12,
+              input_tokens_details: { cached_tokens: 2 },
+              output_tokens: 4,
+              output_tokens_details: { reasoning_tokens: 1 },
+              total_tokens: 16,
+            }
+          : null,
+      metadata: {},
+    });
+
+    this.send({
+      type: "relay.accepted",
+      id: requestId,
+      accepted: {},
+    });
+
+    if (request.method === "GET" && request.path === "/v1/models/val-test") {
+      respond(
+        200,
+        {
+          id: this.modelId,
+          object: "model",
+          created: 1_700_000_000,
+          owned_by: "rmit-val",
+        },
+        {
+          "retry-after-ms": "250",
+          "x-should-retry": "false",
+        },
+      );
+      return;
+    }
+    if (request.method === "GET" && request.path === "/v1/batches/hold") {
+      this.heldRequestIds.push(requestId);
+      return;
+    }
+    if (request.method === "POST" && request.path === "/v1/chat/completions") {
+      const parsed = JSON.parse(body.toString("utf8")) as {
+        model?: string;
+        messages?: unknown;
+        tools?: Array<{ type?: string }>;
+      };
+      assert.equal(parsed.model, this.modelId);
+      if (!JSON.stringify(parsed.messages).includes("NULLABLE_CHAT_V6")) {
+        assert.equal(parsed.tools?.[0]?.type, "custom");
+      }
+      respond(200, {
+        id: "chatcmpl_native_v6",
+        object: "chat.completion",
+        created: 1_700_000_000,
+        model: this.modelId,
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            logprobs: null,
+            message: {
+              role: "assistant",
+              content: "native-chat-ok",
+              refusal: null,
+              annotations: [],
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 5,
+          completion_tokens: 2,
+          total_tokens: 7,
+        },
+      });
+      return;
+    }
+    if (request.method === "POST" && request.path === "/v1/responses") {
+      const parsed = JSON.parse(body.toString("utf8")) as {
+        background?: boolean;
+        input?: string;
+        prompt?: { id?: string };
+      };
+      if (parsed.background === true) {
+        respond(200, responseObject("resp_background", "queued"));
+      } else if (parsed.input === "NULLABLE_V6") {
+        respond(
+          200,
+          responseObject("resp_nullable", "completed", "nullable-ok"),
+        );
+      } else {
+        assert.equal(parsed.prompt?.id, "pmpt_sdk_v6");
+        respond(200, responseObject("resp_prompt", "completed", "prompt-ok"));
+      }
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      request.path === "/v1/responses/resp_background" &&
+      request.query?.includes("stream=true")
+    ) {
+      const completed = responseObject(
+        "resp_background",
+        "completed",
+        "background-ok",
+      );
+      respond(
+        200,
+        [
+          "event: response.completed",
+          `data: ${JSON.stringify({
+            type: "response.completed",
+            response: completed,
+            sequence_number: 0,
+          })}`,
+          "",
+          "data: [DONE]",
+          "",
+        ].join("\n"),
+        {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+        },
+      );
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      request.path === "/v1/responses/resp_background"
+    ) {
+      respond(
+        200,
+        responseObject("resp_background", "completed", "background-ok"),
+      );
+      return;
+    }
+    if (
+      request.method === "POST" &&
+      request.path === "/v1/responses/resp_background/cancel"
+    ) {
+      respond(200, responseObject("resp_background", "cancelled"));
+      return;
+    }
+    if (
+      request.method === "DELETE" &&
+      request.path === "/v1/responses/resp_background"
+    ) {
+      respond(200, {
+        id: "resp_background",
+        object: "response.deleted",
+        deleted: true,
+      });
+      return;
+    }
+    if (
+      request.method === "POST" &&
+      request.path === "/v1/responses/input_tokens"
+    ) {
+      respond(200, { object: "response.input_tokens", input_tokens: 42 });
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      request.path === "/v1/responses/resp_background/input_items"
+    ) {
+      respond(200, {
+        object: "list",
+        data: [
+          {
+            id: "msg_input",
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "background" }],
+          },
+        ],
+        first_id: "msg_input",
+        last_id: "msg_input",
+        has_more: false,
+      });
+      return;
+    }
+    if (request.method === "POST" && request.path === "/v1/responses/compact") {
+      respond(200, {
+        id: "resp_compacted",
+        object: "response.compaction",
+        created_at: 1_700_000_000,
+        output: [
+          {
+            id: "cmp_test",
+            type: "compaction",
+            encrypted_content: "encrypted-compaction-state",
+          },
+        ],
+        usage: {
+          input_tokens: 10,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens: 2,
+          output_tokens_details: { reasoning_tokens: 0 },
+          total_tokens: 12,
+        },
+      });
+      return;
+    }
+    if (request.method === "POST" && request.path === "/v1/files") {
+      assert.match(
+        request.headers["content-type"] ?? "",
+        /^multipart\/form-data;\s*boundary=/i,
+      );
+      assert.match(body.toString("utf8"), /filename="sample\.txt"/);
+      assert.match(body.toString("utf8"), /hello from sdk v6/);
+      respond(200, {
+        id: "file_123",
+        object: "file",
+        bytes: 17,
+        created_at: 1_700_000_000,
+        filename: "sample.txt",
+        purpose: "assistants",
+        status: "processed",
+        status_details: null,
+      });
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      request.path === "/v1/files/file_123/content"
+    ) {
+      respond(200, Buffer.from([0x66, 0x69, 0x6c, 0x65, 0x00, 0xff]), {
+        "content-disposition": 'attachment; filename="sample.bin"',
+      });
+      return;
+    }
+    if (request.method === "GET" && request.path === "/v1/files/file_123") {
+      respond(200, {
+        id: "file_123",
+        object: "file",
+        bytes: 17,
+        created_at: 1_700_000_000,
+        filename: "sample.txt",
+        purpose: "assistants",
+        status: "processed",
+        status_details: null,
+      });
+      return;
+    }
+    if (request.method === "GET" && request.path === "/v1/files") {
+      respond(200, {
+        object: "list",
+        data: [],
+        first_id: null,
+        last_id: null,
+        has_more: false,
+      });
+      return;
+    }
+    if (request.method === "DELETE" && request.path === "/v1/files/file_123") {
+      respond(200, { id: "file_123", object: "file", deleted: true });
+      return;
+    }
+
+    error(
+      404,
+      "unsupported_feature",
+      `${request.method} ${request.path} is not available in this test Val.`,
+    );
   }
 
   private emitReasoningSummary(requestId: string, chatId?: string) {
@@ -1162,6 +1575,129 @@ test("authenticated extension control configures OpenCode without returning secr
   ]);
 });
 
+test("extension security controls rotate keys, reset usage, and persist network scope", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-security-controls-test-"),
+  );
+  let server = await ValBridgeServer.create({
+    config: { host: "0.0.0.0", port: 0, configDirectory },
+    quiet: true,
+  });
+  await server.listen();
+  const extension = new FakeValExtension(server);
+  await extension.pair();
+  await extension.connect();
+  let closed = false;
+
+  t.after(async () => {
+    extension.close();
+    if (!closed) await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  const initialHealth = (await (
+    await fetch(`${server.baseUrl}/healthz`)
+  ).json()) as Record<string, unknown>;
+  assert.equal(initialHealth.network_scope, "lan");
+  assert.equal(initialHealth.client_ip_allowlist, false);
+
+  const previousKey = server.secrets.get().clientApiKey;
+  const rotatedResponse = await extensionControlFetch(
+    server,
+    extension,
+    "/bridge/security/rotate-client-key",
+    { method: "POST" },
+  );
+  assert.equal(rotatedResponse.status, 200);
+  const rotated = (await rotatedResponse.json()) as {
+    rotated: boolean;
+    client_api_key: string;
+  };
+  assert.equal(rotated.rotated, true);
+  assert.match(rotated.client_api_key, /^val-local-/);
+  assert.notEqual(rotated.client_api_key, previousKey);
+
+  const oldKeyResponse = await fetch(`${server.baseUrl}/v1/models`, {
+    headers: { authorization: `Bearer ${previousKey}` },
+  });
+  assert.equal(oldKeyResponse.status, 401);
+  assert.equal((await apiFetch(server, "/v1/models")).status, 200);
+
+  const stats: UsageStatsSnapshot = {
+    startedAt: 100,
+    lastUpdatedAt: 200,
+    requests: 1,
+    completedRequests: 1,
+    failedRequests: 0,
+    cancelledRequests: 0,
+    meteredRequests: 1,
+    inputTokens: 10,
+    outputTokens: 5,
+    totalTokens: 15,
+    reasoningTokens: 3,
+    reasoningMeteredRequests: 1,
+    reasoningSummaryRequests: 1,
+    hiddenReasoningRequests: 0,
+    pricedRequests: 1,
+    estimatedOpenAICostNanodollars: 1_000,
+  };
+  extension.sendUsageStats(stats);
+  await waitFor(
+    () => server.usageStats.snapshot()?.totalTokens === 15,
+    "usage before reset",
+  );
+  const resetResponse = await extensionControlFetch(
+    server,
+    extension,
+    "/bridge/usage/reset",
+    { method: "POST" },
+  );
+  assert.equal(resetResponse.status, 200);
+  const reset = (await resetResponse.json()) as {
+    reset: boolean;
+    stats: UsageStatsSnapshot;
+  };
+  assert.equal(reset.reset, true);
+  assert.equal(reset.stats.totalTokens, 0);
+  assert.equal(server.usageStats.snapshot()?.requests, 0);
+
+  const scopeResponse = await extensionControlFetch(
+    server,
+    extension,
+    "/bridge/network-scope",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scope: "loopback" }),
+    },
+  );
+  assert.equal(scopeResponse.status, 200);
+  assert.deepEqual(await scopeResponse.json(), {
+    accepted: true,
+    network_scope: "loopback",
+    restart_required: true,
+    restart_scheduled: false,
+  });
+
+  extension.close();
+  await server.close();
+  closed = true;
+  server = await ValBridgeServer.create({
+    config: { port: 0, configDirectory },
+    quiet: true,
+  });
+  await server.listen();
+  closed = false;
+  assert.equal(server.config.host, "127.0.0.1");
+  assert.equal(server.secrets.get().clientApiKey, rotated.client_api_key);
+  assert.equal(server.usageStats.snapshot()?.requests, 0);
+  assert.equal(typeof server.usageStats.snapshot()?.resetAt, "number");
+  const restoredHealth = (await (
+    await fetch(`${server.baseUrl}/healthz`)
+  ).json()) as Record<string, unknown>;
+  assert.equal(restoredHealth.network_scope, "loopback");
+});
+
 test("periodic update control discovers releases and waits for active requests", async (t) => {
   const configDirectory = await mkdtemp(
     join(tmpdir(), "val-bridge-update-test-"),
@@ -1506,6 +2042,7 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
       port: 0,
       configDirectory,
       requestTimeoutMs: 2_000,
+      corsOrigins: new Set(["https://sdk-client.example"]),
     },
     quiet: true,
   });
@@ -1541,6 +2078,43 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   assert.equal(health.val_session, true);
   assert.ok(!("client_api_key" in health));
   assert.ok(!("extension_id" in health));
+  assert.deepEqual(health.openai_sdk, {
+    major: 6,
+    http_passthrough: true,
+    websocket_passthrough: false,
+    body_limit_bytes: 10 * 1024 * 1024,
+  });
+
+  const sdkPreflight = await fetch(`${server.baseUrl}/v1/files/file_123`, {
+    method: "OPTIONS",
+    headers: {
+      origin: "https://sdk-client.example",
+      "access-control-request-method": "DELETE",
+      "access-control-request-headers":
+        "authorization, content-type, x-stainless-helper-method",
+    },
+  });
+  assert.equal(sdkPreflight.status, 204);
+  assert.match(
+    sdkPreflight.headers.get("access-control-allow-methods") ?? "",
+    /DELETE/,
+  );
+  assert.match(
+    sdkPreflight.headers.get("access-control-allow-headers") ?? "",
+    /x-stainless-helper-method/,
+  );
+  assert.match(
+    sdkPreflight.headers.get("access-control-expose-headers") ?? "",
+    /x-request-id/,
+  );
+  assert.match(
+    sdkPreflight.headers.get("access-control-expose-headers") ?? "",
+    /retry-after-ms/,
+  );
+  assert.match(
+    sdkPreflight.headers.get("access-control-expose-headers") ?? "",
+    /x-should-retry/,
+  );
 
   const models = await client.models.list();
   assert.deepEqual(
@@ -1649,6 +2223,42 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
     "call_weather",
   );
 
+  const customToolCompletion = await client.chat.completions.create({
+    model: "val-test",
+    messages: [{ role: "user", content: "Use the custom grammar tool." }],
+    tools: [
+      {
+        type: "custom",
+        custom: {
+          name: "code",
+          description: "Return a code fragment.",
+          format: { type: "text" },
+        },
+      },
+    ],
+  });
+  assert.equal(
+    customToolCompletion.choices[0]?.message.content,
+    "native-chat-ok",
+  );
+  assert.ok(
+    extension.httpRequests.some(
+      (request) =>
+        request.method === "POST" && request.path === "/v1/chat/completions",
+    ),
+  );
+
+  const nullableChatCompletion = await client.chat.completions.create({
+    model: "val-test",
+    messages: [{ role: "user", content: "NULLABLE_CHAT_V6" }],
+    n: null,
+    store: null,
+  });
+  assert.equal(
+    nullableChatCompletion.choices[0]?.message.content,
+    "native-chat-ok",
+  );
+
   const storedResponse = await client.responses.create({
     model: "val-test",
     input: "STORE_THIS",
@@ -1744,6 +2354,245 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   );
   assert.ok(
     reasoningEventTypes.includes("response.reasoning_summary_part.done"),
+  );
+
+  const v6Response = await client.responses.create(
+    {
+      model: "val-test",
+      input: "SDK_V6_FIELDS",
+      include: ["reasoning.encrypted_content"],
+      context_management: [{ type: "compaction", compact_threshold: 900_000 }],
+      prompt_cache_key: "sdk-v6-fields",
+      prompt_cache_options: { mode: "explicit", ttl: "30m" },
+      reasoning: {
+        context: "all_turns",
+        effort: "max",
+        mode: "pro",
+        summary: "auto",
+      },
+      safety_identifier: "hashed-test-user",
+      text: { format: { type: "text" }, verbosity: "high" },
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          description: "Look up a value.",
+          parameters: {
+            type: "object",
+            properties: { key: { type: "string" } },
+            required: ["key"],
+            additionalProperties: false,
+          },
+          strict: true,
+          allowed_callers: ["direct", "programmatic"],
+        },
+        {
+          type: "apply_patch",
+          allowed_callers: ["direct", "programmatic"],
+        },
+      ],
+      tool_choice: "auto",
+    },
+    { headers: { "OpenAI-Beta": "responses_multi_agent=v1" } },
+  );
+  assert.equal(v6Response.status, "completed");
+  const v6Relay = extension.responsesRequests.find((request) =>
+    JSON.stringify(request.body).includes("SDK_V6_FIELDS"),
+  );
+  assert.deepEqual(v6Relay?.body.reasoning, {
+    context: "all_turns",
+    effort: "max",
+    mode: "pro",
+    summary: "auto",
+  });
+  assert.deepEqual(v6Relay?.body.include, ["reasoning.encrypted_content"]);
+  assert.deepEqual(v6Relay?.body.prompt_cache_options, {
+    mode: "explicit",
+    ttl: "30m",
+  });
+  assert.equal(v6Relay?.body.text?.verbosity, "high");
+  assert.equal(v6Relay?.headers?.["openai-beta"], "responses_multi_agent=v1");
+  assert.equal(v6Relay?.headers?.authorization, undefined);
+
+  const parsedResponse = await client.responses.parse({
+    model: "val-test",
+    input: "SDK_PARSE",
+    text: {
+      format: zodTextFormat(z.object({ answer: z.string() }), "bridge_answer"),
+    },
+  });
+  assert.deepEqual(parsedResponse.output_parsed, { answer: "parsed-ok" });
+
+  const responseRunner = client.responses.stream({
+    model: "val-test",
+    input: "RESPONSES_STREAM_HELPER",
+  });
+  const helperEvents: string[] = [];
+  for await (const event of responseRunner) helperEvents.push(event.type);
+  const helperFinal = await responseRunner.finalResponse();
+  assert.equal(helperFinal.output_text, "bridge-ok");
+  assert.equal(helperEvents.at(-1), "response.completed");
+
+  let toolRunnerCity = "";
+  const toolRunner = client.chat.completions.runTools({
+    model: "val-test",
+    messages: [{ role: "user", content: "SDK_RUN_TOOL" }],
+    tools: [
+      zodFunction({
+        name: "get_weather",
+        description: "Return the weather for a city.",
+        parameters: z.object({ city: z.string() }),
+        function: ({ city }) => {
+          toolRunnerCity = city;
+          return { temperature: 20 };
+        },
+      }),
+    ],
+  });
+  assert.equal(await toolRunner.finalContent(), "bridge-ok");
+  assert.equal(toolRunnerCity, "Melbourne");
+
+  const promptResponse = await client.responses.create({
+    prompt: { id: "pmpt_sdk_v6", variables: { topic: "bridges" } },
+  });
+  assert.equal(promptResponse.output_text, "prompt-ok");
+  assert.ok(
+    extension.httpRequests.some(
+      (request) =>
+        request.method === "POST" &&
+        request.path === "/v1/responses" &&
+        Buffer.from(request.body?.data ?? "", "base64")
+          .toString("utf8")
+          .includes("pmpt_sdk_v6"),
+    ),
+  );
+
+  const nullableResponse = await client.responses.create({
+    model: "val-test",
+    input: "NULLABLE_V6",
+    instructions: null,
+    max_output_tokens: null,
+    store: null,
+  });
+  assert.equal(nullableResponse.output_text, "nullable-ok");
+
+  const {
+    data: retrievedModel,
+    response: retrievedModelResponse,
+    request_id: retrievedModelRequestId,
+  } = await client.models.retrieve("val-test").withResponse();
+  assert.equal(retrievedModel.id, "val-test");
+  assert.match(retrievedModelRequestId ?? "", /^req_/);
+  assert.equal(
+    (retrievedModel as { _request_id?: string })._request_id,
+    retrievedModelRequestId,
+  );
+  assert.equal(retrievedModelResponse.headers.get("retry-after-ms"), "250");
+  assert.equal(retrievedModelResponse.headers.get("x-should-retry"), "false");
+
+  const backgroundResponse = await client.responses.create({
+    model: "val-test",
+    input: "BACKGROUND_V6",
+    background: true,
+    store: true,
+  });
+  assert.equal(backgroundResponse.id, "resp_background");
+  assert.equal(backgroundResponse.status, "queued");
+
+  const retrievedResponse = await client.responses.retrieve(
+    backgroundResponse.id,
+  );
+  assert.equal(retrievedResponse.status, "completed");
+  assert.equal(retrievedResponse.output_text, "background-ok");
+
+  const retrievedResponseStream = await client.responses.retrieve(
+    backgroundResponse.id,
+    { stream: true },
+  );
+  const retrievedEventTypes: string[] = [];
+  for await (const event of retrievedResponseStream) {
+    retrievedEventTypes.push(event.type);
+  }
+  assert.deepEqual(retrievedEventTypes, ["response.completed"]);
+
+  const inputItems = await client.responses.inputItems.list(
+    backgroundResponse.id,
+    { order: "asc" },
+  );
+  assert.equal(inputItems.data[0]?.type, "message");
+
+  const inputTokens = await client.responses.inputTokens.count({
+    model: "val-test",
+    input: "count these tokens",
+  });
+  assert.equal(inputTokens.input_tokens, 42);
+
+  const compacted = await client.responses.compact({
+    model: "val-test",
+    input: "compact this conversation",
+    prompt_cache_key: "sdk-v6-contract",
+    prompt_cache_options: { mode: "explicit", ttl: "30m" },
+  });
+  assert.equal(compacted.object, "response.compaction");
+  assert.equal(compacted.output.at(-1)?.type, "compaction");
+
+  const cancelledResponse = await client.responses.cancel(
+    backgroundResponse.id,
+  );
+  assert.equal(cancelledResponse.status, "cancelled");
+  await client.responses.delete(backgroundResponse.id);
+
+  const uploaded = await client.files.create({
+    file: await toFile(Buffer.from("hello from sdk v6", "utf8"), "sample.txt"),
+    purpose: "assistants",
+  });
+  assert.equal(uploaded.id, "file_123");
+  assert.equal(
+    (await client.files.retrieve(uploaded.id)).filename,
+    "sample.txt",
+  );
+  assert.equal((await client.files.list()).data.length, 0);
+  const fileContent = await client.files.content(uploaded.id);
+  assert.deepEqual(
+    Buffer.from(await fileContent.arrayBuffer()),
+    Buffer.from([0x66, 0x69, 0x6c, 0x65, 0x00, 0xff]),
+  );
+  assert.equal((await client.files.delete(uploaded.id)).deleted, true);
+
+  const genericAbort = new AbortController();
+  const heldBatch = client.batches.retrieve("hold", {
+    signal: genericAbort.signal,
+  });
+  await waitFor(
+    () =>
+      extension.httpRequests.some(
+        (request) =>
+          request.method === "GET" && request.path === "/v1/batches/hold",
+      ),
+    "generic SDK request acceptance",
+  );
+  genericAbort.abort();
+  await assert.rejects(heldBatch, /aborted/i);
+  await waitFor(
+    () => extension.cancelledRequestIds.length > 0,
+    "generic SDK request cancellation",
+  );
+
+  const relayedBackgroundRequest = extension.httpRequests.find(
+    (request) => request.method === "POST" && request.path === "/v1/responses",
+  );
+  assert.ok(relayedBackgroundRequest);
+  assert.equal(
+    relayedBackgroundRequest.headers.authorization,
+    undefined,
+    "the local client API key must never be forwarded to Val",
+  );
+  assert.ok(
+    extension.httpRequests.some(
+      (request) =>
+        request.path === "/v1/responses/resp_background" &&
+        request.query?.includes("stream=true"),
+    ),
   );
 
   const hiddenReasoningResponse = await apiFetch(
@@ -1844,7 +2693,7 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ model: "val-test", input: "hello" }),
   });
-  assert.equal(unsupported.status, 400);
+  assert.equal(unsupported.status, 404);
   assert.equal(
     ((await unsupported.json()) as { error: { code: string } }).error.code,
     "unsupported_feature",

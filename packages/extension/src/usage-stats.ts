@@ -42,6 +42,7 @@ const REASONING_TOKEN_DETAIL_KEYS = [
   "outputTokensDetails",
 ];
 const LONG_CONTEXT_THRESHOLD = 272_000;
+export const GPT_56_PRICING_SNAPSHOT_DATE = "2026-07-24";
 const GPT_56_PRICING_NANODOLLARS_PER_TOKEN: Record<
   Gpt56Tier,
   { input: number; cachedInput: number; output: number }
@@ -67,20 +68,67 @@ function record(value: unknown) {
     : undefined;
 }
 
+function nonEmptyText(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function reasoningSummaryInRecord(value: unknown): boolean {
+  const item = record(value);
+  if (!item) return false;
+
+  if (
+    nonEmptyText(item.reasoning_content) ||
+    nonEmptyText(item.reasoningContent)
+  ) {
+    return true;
+  }
+
+  if (
+    typeof item.type === "string" &&
+    (item.type.includes("reasoning_summary") ||
+      item.type === "reasoning.text" ||
+      item.type === "reasoning_text") &&
+    (nonEmptyText(item.text) || nonEmptyText(item.delta))
+  ) {
+    return true;
+  }
+
+  const summary = Array.isArray(item.summary) ? item.summary : [];
+  if (
+    summary.some((rawPart) => {
+      const part = record(rawPart);
+      return nonEmptyText(part?.text) || nonEmptyText(part?.delta);
+    })
+  ) {
+    return true;
+  }
+
+  const details = Array.isArray(item.reasoning_details)
+    ? item.reasoning_details
+    : [];
+  if (details.some((detail) => reasoningSummaryInRecord(detail))) {
+    return true;
+  }
+
+  const choices = Array.isArray(item.choices) ? item.choices : [];
+  return choices.some((rawChoice) => {
+    const choice = record(rawChoice);
+    return (
+      reasoningSummaryInRecord(choice?.message) ||
+      reasoningSummaryInRecord(choice?.delta)
+    );
+  });
+}
+
 export function responseUsageDetails(value: unknown) {
   const event = record(value);
   const response = record(event?.response) ?? event;
   const usage = record(response?.usage);
   const output = Array.isArray(response?.output) ? response.output : [];
-  const reasoningSummaryAvailable = output.some((rawItem) => {
-    const item = record(rawItem);
-    if (item?.type !== "reasoning" || !Array.isArray(item.summary))
-      return false;
-    return item.summary.some((rawPart) => {
-      const part = record(rawPart);
-      return typeof part?.text === "string" && part.text.trim().length > 0;
-    });
-  });
+  const reasoningSummaryAvailable =
+    reasoningSummaryInRecord(event) ||
+    reasoningSummaryInRecord(response) ||
+    output.some((rawItem) => reasoningSummaryInRecord(rawItem));
   return { usage, reasoningSummaryAvailable };
 }
 
@@ -236,6 +284,8 @@ export function restoreSessionUsageStats(
       record.estimatedOpenAICostNanodollars,
     ),
   };
+  const resetAt = storedCount(record.resetAt);
+  if (resetAt > 0) restored.resetAt = resetAt;
   const lastRequestTokens = storedCount(record.lastRequestTokens);
   if (lastRequestTokens > 0) {
     restored.lastRequestTokens = lastRequestTokens;
@@ -271,10 +321,18 @@ export function newerUsageStats(
   persisted: SessionUsageStats,
 ): SessionUsageStats {
   if (current.requests > 0 && persisted.requests === 0) {
-    return { ...current };
+    return {
+      ...(persisted.resetAt && persisted.resetAt >= current.lastUpdatedAt
+        ? persisted
+        : current),
+    };
   }
   if (current.requests === 0 && persisted.requests > 0) {
-    return { ...persisted };
+    return {
+      ...(current.resetAt && current.resetAt >= persisted.lastUpdatedAt
+        ? current
+        : persisted),
+    };
   }
   if (current.lastUpdatedAt !== persisted.lastUpdatedAt) {
     return {

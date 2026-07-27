@@ -1,5 +1,6 @@
 import { randomBytes, randomInt } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeJsonAtomic } from "./json-file.js";
@@ -18,6 +19,7 @@ export type RuntimeConfig = {
   responseTimeoutMs: number;
   bodyLimitBytes: number;
   corsOrigins: Set<string>;
+  allowedClientIps: Set<string>;
   configDirectory: string;
 };
 
@@ -79,15 +81,36 @@ export function loadRuntimeConfig(
       integerFromEnv("VAL_BRIDGE_RESPONSE_TIMEOUT_MS", 0, 0, 3_600_000),
     bodyLimitBytes: overrides.bodyLimitBytes ?? 10 * 1024 * 1024,
     corsOrigins: overrides.corsOrigins ?? new Set(configuredOrigins),
+    allowedClientIps:
+      overrides.allowedClientIps ?? normalizedAllowedClientIps(),
     configDirectory: overrides.configDirectory ?? defaultConfigDirectory(),
   };
 }
 
 function createSecrets(): BridgeSecrets {
   return {
-    clientApiKey: `val-local-${randomBytes(32).toString("base64url")}`,
+    clientApiKey: createClientApiKey(),
     bridgeSecret: randomBytes(32).toString("base64url"),
   };
+}
+
+function createClientApiKey() {
+  return `val-local-${randomBytes(32).toString("base64url")}`;
+}
+
+function normalizedAllowedClientIps() {
+  const values =
+    process.env.VAL_BRIDGE_ALLOWED_CLIENT_IPS?.split(",")
+      .map((value) => value.trim())
+      .filter(Boolean) ?? [];
+  for (const value of values) {
+    if (isIP(value) === 0) {
+      throw new Error(
+        "VAL_BRIDGE_ALLOWED_CLIENT_IPS must contain exact IP addresses.",
+      );
+    }
+  }
+  return new Set(values);
 }
 
 export class SecretsStore {
@@ -137,6 +160,13 @@ export class SecretsStore {
   async authorizeExtension(extensionId: string) {
     this.value = { ...this.value, extensionId };
     await writeJsonAtomic(this.path, this.value);
+  }
+
+  async rotateClientApiKey() {
+    const clientApiKey = createClientApiKey();
+    this.value = { ...this.value, clientApiKey };
+    await writeJsonAtomic(this.path, this.value);
+    return clientApiKey;
   }
 }
 

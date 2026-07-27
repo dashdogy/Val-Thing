@@ -13,6 +13,7 @@ import {
   type PairRequest,
   type PairResponse,
   type RelayDoneResult,
+  type RelayOpenAIHttpRequest,
 } from "@val-bridge/protocol";
 import { WebSocketServer } from "ws";
 import { BridgeHub } from "./bridge-hub.js";
@@ -31,16 +32,29 @@ import {
 } from "./errors.js";
 import { MappingStore } from "./mapping-store.js";
 import {
+  hostForNetworkScope,
+  NetworkSettingsStore,
+  networkScopeForHost,
+  type NetworkScope,
+} from "./network-settings.js";
+import {
   chatRequestToRelay,
   parseChatCompletion,
   parseResponse,
-  responseInputToMessages,
   titleFromMessages,
   type ChatCompletionRequest,
   responseRequestToRelay,
-  responseToolsToChatTools,
   type ResponseRequest,
 } from "./openai-schema.js";
+import {
+  decodeRelayChunk,
+  parseJsonBuffer,
+  readRawBody,
+  relayHttpMethod,
+  requestHeadersForRelay,
+  responseHeadersForClient,
+  validateOpenAIProxyPath,
+} from "./openai-http-relay.js";
 import {
   configureOpenCode,
   openAIModelCapabilities,
@@ -65,6 +79,92 @@ type BridgeServerOptions = {
 };
 
 const MAX_PAIRING_FAILURES = 10;
+const CORS_METHODS = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS";
+const CORS_REQUEST_HEADERS = [
+  "accept",
+  "authorization",
+  "content-type",
+  "idempotency-key",
+  "openai-beta",
+  "openai-organization",
+  "openai-project",
+  "x-stainless-arch",
+  "x-stainless-custom-poll-interval",
+  "x-stainless-helper-method",
+  "x-stainless-lang",
+  "x-stainless-os",
+  "x-stainless-package-version",
+  "x-stainless-poll-helper",
+  "x-stainless-retry-count",
+  "x-stainless-runtime",
+  "x-stainless-runtime-version",
+  "x-stainless-timeout",
+].join(", ");
+const CORS_RESPONSE_HEADERS = [
+  "content-disposition",
+  "etag",
+  "location",
+  "openai-processing-ms",
+  "openai-version",
+  "retry-after",
+  "retry-after-ms",
+  "x-request-id",
+  "x-ratelimit-limit-requests",
+  "x-ratelimit-limit-tokens",
+  "x-ratelimit-remaining-requests",
+  "x-ratelimit-remaining-tokens",
+  "x-ratelimit-reset-requests",
+  "x-ratelimit-reset-tokens",
+  "x-should-retry",
+  "x-val-chat-id",
+  "x-val-reasoning-status",
+  "x-val-reasoning-tokens",
+  "x-val-reasoning-tokens-reported",
+].join(", ");
+const CHAT_BRIDGE_FIELDS = new Set([
+  "audio",
+  "frequency_penalty",
+  "logit_bias",
+  "logprobs",
+  "max_completion_tokens",
+  "max_tokens",
+  "messages",
+  "metadata",
+  "modalities",
+  "model",
+  "n",
+  "parallel_tool_calls",
+  "presence_penalty",
+  "reasoning_effort",
+  "reasoning_summary",
+  "response_format",
+  "seed",
+  "service_tier",
+  "stop",
+  "store",
+  "stream",
+  "stream_options",
+  "temperature",
+  "tool_choice",
+  "tools",
+  "top_logprobs",
+  "top_p",
+  "verbosity",
+]);
+const CHAT_BRIDGE_ROLES = new Set([
+  "system",
+  "developer",
+  "user",
+  "assistant",
+  "tool",
+]);
+const CHAT_BRIDGE_CONTENT_TYPES = new Set([
+  "text",
+  "input_text",
+  "output_text",
+  "image_url",
+  "input_image",
+]);
 
 function safeEqual(left: string, right: string) {
   const leftBuffer = Buffer.from(left);
@@ -73,6 +173,24 @@ function safeEqual(left: string, right: string) {
     leftBuffer.length === rightBuffer.length &&
     timingSafeEqual(leftBuffer, rightBuffer)
   );
+}
+
+export function normalizeRemoteAddress(address: string) {
+  return address.startsWith("::ffff:") ? address.slice(7) : address;
+}
+
+export function clientIpAllowed(
+  remoteAddress: string,
+  allowedClientIps: ReadonlySet<string>,
+) {
+  if (
+    remoteAddress === "127.0.0.1" ||
+    remoteAddress === "::1" ||
+    remoteAddress === "0:0:0:0:0:0:0:1"
+  ) {
+    return true;
+  }
+  return allowedClientIps.size === 0 || allowedClientIps.has(remoteAddress);
 }
 
 function json(
@@ -103,35 +221,50 @@ async function readJsonBody(
   request: IncomingMessage,
   limitBytes: number,
 ): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const rawChunk of request) {
-    const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
-    size += chunk.length;
-    if (size > limitBytes) {
-      throw new OpenAIHttpError(
-        413,
-        "request_too_large",
-        `Request bodies are limited to ${limitBytes} bytes.`,
-      );
-    }
-    chunks.push(chunk);
-  }
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-  } catch {
-    throw new OpenAIHttpError(
-      400,
-      "invalid_json",
-      "The request body is not valid JSON.",
-    );
-  }
+  return parseJsonBuffer(await readRawBody(request, limitBytes));
 }
 
 function bearerToken(request: IncomingMessage) {
   const authorization = request.headers.authorization;
   if (!authorization?.startsWith("Bearer ")) return null;
   return authorization.slice("Bearer ".length);
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function chatNeedsHttpRelay(value: Record<string, unknown>) {
+  if (Object.keys(value).some((key) => !CHAT_BRIDGE_FIELDS.has(key))) {
+    return true;
+  }
+  if (value.n !== undefined && value.n !== 1) return true;
+  if (value.audio !== undefined && value.audio !== null) return true;
+  if (
+    Array.isArray(value.modalities) &&
+    value.modalities.some((modality) => modality !== "text")
+  ) {
+    return true;
+  }
+  if (
+    Array.isArray(value.tools) &&
+    value.tools.some((tool) => plainRecord(tool)?.type !== "function")
+  ) {
+    return true;
+  }
+  if (!Array.isArray(value.messages)) return false;
+  return value.messages.some((rawMessage) => {
+    const message = plainRecord(rawMessage);
+    if (!message) return false;
+    if (!CHAT_BRIDGE_ROLES.has(String(message.role))) return true;
+    if (!Array.isArray(message.content)) return false;
+    return message.content.some((rawPart) => {
+      const part = plainRecord(rawPart);
+      return part ? !CHAT_BRIDGE_CONTENT_TYPES.has(String(part.type)) : false;
+    });
+  });
 }
 
 function writeChatSse(response: ServerResponse, value: unknown) {
@@ -175,6 +308,7 @@ export class ValBridgeServer {
   readonly diagnostics: DiagnosticsLog;
   readonly updateChecker: UpdateChecker;
   readonly usageStats: UsageStatsStore;
+  readonly networkSettings: NetworkSettingsStore;
 
   private readonly semaphore: Semaphore;
   private readonly httpServer;
@@ -184,7 +318,7 @@ export class ValBridgeServer {
   private pairingCompleted = false;
   private pairingFailures = 0;
   private activeApiRequests = 0;
-  private updateShutdownScheduled = false;
+  private restartShutdownScheduled = false;
 
   private constructor(
     config: RuntimeConfig,
@@ -193,6 +327,7 @@ export class ValBridgeServer {
     diagnostics: DiagnosticsLog,
     updateChecker: UpdateChecker,
     usageStats: UsageStatsStore,
+    networkSettings: NetworkSettingsStore,
     private readonly quiet: boolean,
     private readonly onUpdateRequested?: () => void,
   ) {
@@ -202,6 +337,7 @@ export class ValBridgeServer {
     this.diagnostics = diagnostics;
     this.updateChecker = updateChecker;
     this.usageStats = usageStats;
+    this.networkSettings = networkSettings;
     this.pairingCode = createPairingCode();
     this.pairingExpiresAt = Date.now() + 5 * 60_000;
     this.hub = new BridgeHub(secrets, config.requestTimeoutMs, usageStats);
@@ -233,7 +369,21 @@ export class ValBridgeServer {
   }
 
   static async create(options: BridgeServerOptions = {}) {
-    const config = loadRuntimeConfig(options.config);
+    const initialConfig = loadRuntimeConfig(options.config);
+    const networkSettings = await NetworkSettingsStore.open(
+      initialConfig.configDirectory,
+    );
+    const persistedScope = networkSettings.get();
+    const hasExplicitHost =
+      options.config?.host !== undefined ||
+      Boolean(process.env.VAL_BRIDGE_HOST?.trim());
+    const config =
+      persistedScope && !hasExplicitHost
+        ? loadRuntimeConfig({
+            ...options.config,
+            host: hostForNetworkScope(persistedScope),
+          })
+        : initialConfig;
     const secrets = await SecretsStore.open(config.configDirectory);
     const mappings = await MappingStore.open(config.configDirectory);
     const diagnostics = new DiagnosticsLog(config.configDirectory);
@@ -246,6 +396,7 @@ export class ValBridgeServer {
       diagnostics,
       updateChecker,
       usageStats,
+      networkSettings,
       options.quiet ?? false,
       options.onUpdateRequested,
     );
@@ -336,8 +487,8 @@ export class ValBridgeServer {
       if (method === "OPTIONS") {
         noContent(response, {
           ...corsHeaders,
-          "access-control-allow-methods": "GET, POST, OPTIONS",
-          "access-control-allow-headers": "authorization, content-type",
+          "access-control-allow-methods": CORS_METHODS,
+          "access-control-allow-headers": CORS_REQUEST_HEADERS,
           "access-control-max-age": "600",
         });
         return;
@@ -351,11 +502,19 @@ export class ValBridgeServer {
           {
             status: this.hub.hasReadyExtension() ? "ok" : "degraded",
             protocol_version: PROTOCOL_VERSION,
+            network_scope: networkScopeForHost(this.config.host),
+            client_ip_allowlist: this.config.allowedClientIps.size > 0,
             extension_connected: extension.extensionConnected,
             val_session: extension.valSession,
             val_socket: extension.valSocket,
             compatible: extension.compatible,
             active_requests: this.activeApiRequests,
+            openai_sdk: {
+              major: 6,
+              http_passthrough: true,
+              websocket_passthrough: false,
+              body_limit_bytes: this.config.bodyLimitBytes,
+            },
           },
           corsHeaders,
         );
@@ -381,10 +540,28 @@ export class ValBridgeServer {
         await this.handlePrepareUpdate(request, response, corsHeaders);
         return;
       }
+      if (
+        method === "POST" &&
+        url.pathname === "/bridge/security/rotate-client-key"
+      ) {
+        this.authenticateExtensionControl(request);
+        await this.handleRotateClientKey(response, corsHeaders);
+        return;
+      }
+      if (method === "POST" && url.pathname === "/bridge/usage/reset") {
+        this.authenticateExtensionControl(request);
+        await this.handleResetUsage(response, corsHeaders);
+        return;
+      }
+      if (method === "POST" && url.pathname === "/bridge/network-scope") {
+        this.authenticateExtensionControl(request);
+        await this.handleNetworkScope(request, response, corsHeaders);
+        return;
+      }
 
       if (url.pathname.startsWith("/v1/")) {
         this.authenticateClient(request);
-        if (this.updateShutdownScheduled) {
+        if (this.restartShutdownScheduled) {
           throw new OpenAIHttpError(
             503,
             "bridge_updating",
@@ -413,11 +590,10 @@ export class ValBridgeServer {
         return;
       }
       if (url.pathname.startsWith("/v1/")) {
-        throw new OpenAIHttpError(
-          400,
-          "unsupported_feature",
-          `The endpoint ${method} ${url.pathname} is outside this Val chat/agent bridge.`,
+        await this.trackApiRequest(() =>
+          this.handleOpenAIProxy(request, response, url, corsHeaders),
         );
+        return;
       }
       throw new OpenAIHttpError(
         404,
@@ -426,6 +602,7 @@ export class ValBridgeServer {
       );
     } catch (rawError) {
       const error = asOpenAIHttpError(rawError);
+      if (response.destroyed) return;
       if (response.headersSent) {
         if (!response.writableEnded) {
           writeChatSse(response, openAIErrorBody(error));
@@ -457,6 +634,7 @@ export class ValBridgeServer {
     }
     return {
       "access-control-allow-origin": origin,
+      "access-control-expose-headers": CORS_RESPONSE_HEADERS,
       vary: "Origin",
     };
   }
@@ -469,6 +647,17 @@ export class ValBridgeServer {
         "invalid_api_key",
         "The local Val bridge API key is invalid.",
         "authentication_error",
+      );
+    }
+    const remoteAddress = normalizeRemoteAddress(
+      request.socket.remoteAddress ?? "",
+    );
+    if (!clientIpAllowed(remoteAddress, this.config.allowedClientIps)) {
+      throw new OpenAIHttpError(
+        403,
+        "client_ip_not_allowed",
+        "This client IP address is not allowed to access the bridge API.",
+        "permission_error",
       );
     }
   }
@@ -595,6 +784,84 @@ export class ValBridgeServer {
     );
   }
 
+  private async handleRotateClientKey(
+    response: ServerResponse,
+    headers: Record<string, string>,
+  ) {
+    this.assertRestartIdle();
+    const clientApiKey = await this.secrets.rotateClientApiKey();
+    json(
+      response,
+      200,
+      {
+        rotated: true,
+        client_api_key: clientApiKey,
+      },
+      headers,
+    );
+  }
+
+  private async handleResetUsage(
+    response: ServerResponse,
+    headers: Record<string, string>,
+  ) {
+    this.assertRestartIdle();
+    const stats = this.usageStats.reset();
+    await this.usageStats.flush();
+    json(response, 200, { reset: true, stats }, headers);
+  }
+
+  private async handleNetworkScope(
+    request: IncomingMessage,
+    response: ServerResponse,
+    headers: Record<string, string>,
+  ) {
+    this.assertRestartIdle();
+    const body = (await readJsonBody(request, 8 * 1024)) as Record<
+      string,
+      unknown
+    >;
+    const scope = body.scope;
+    if (scope !== "loopback" && scope !== "lan") {
+      throw new OpenAIHttpError(
+        400,
+        "invalid_network_scope",
+        "Network scope must be loopback or lan.",
+        "invalid_request_error",
+        "scope",
+      );
+    }
+    const currentScope = networkScopeForHost(this.config.host);
+    if (scope === currentScope) {
+      json(
+        response,
+        200,
+        {
+          accepted: true,
+          network_scope: scope,
+          restart_required: false,
+        },
+        headers,
+      );
+      return;
+    }
+
+    await this.networkSettings.set(scope as NetworkScope);
+    const restartScheduled = Boolean(this.onUpdateRequested);
+    json(
+      response,
+      restartScheduled ? 202 : 200,
+      {
+        accepted: true,
+        network_scope: scope,
+        restart_required: true,
+        restart_scheduled: restartScheduled,
+      },
+      headers,
+    );
+    if (restartScheduled) this.scheduleRestart();
+  }
+
   private updateVersion(value: unknown) {
     if (typeof value !== "string" || !/^\d+\.\d+\.\d+$/.test(value)) {
       throw new OpenAIHttpError(
@@ -617,7 +884,7 @@ export class ValBridgeServer {
     }
   }
 
-  private assertUpdateIdle() {
+  private assertRestartIdle() {
     if (this.activeApiRequests > 0 || this.semaphore.inUse > 0) {
       throw new OpenAIHttpError(
         409,
@@ -625,6 +892,17 @@ export class ValBridgeServer {
         "Wait for active API requests to finish before updating.",
       );
     }
+  }
+
+  private scheduleRestart() {
+    this.restartShutdownScheduled = true;
+    setTimeout(() => {
+      try {
+        this.onUpdateRequested?.();
+      } catch {
+        // The process-level shutdown handler owns restart failures.
+      }
+    }, 100).unref();
   }
 
   private async handleUpdateStatus(
@@ -665,14 +943,14 @@ export class ValBridgeServer {
         "This companion was not launched by the installed updater.",
       );
     }
-    if (this.updateShutdownScheduled) {
+    if (this.restartShutdownScheduled) {
       throw new OpenAIHttpError(
         409,
         "update_already_started",
         "The update restart has already started.",
       );
     }
-    this.assertUpdateIdle();
+    this.assertRestartIdle();
     const body = (await readJsonBody(request, 16 * 1024)) as Record<
       string,
       unknown
@@ -691,9 +969,8 @@ export class ValBridgeServer {
         "No newer bridge release is available.",
       );
     }
-    this.assertUpdateIdle();
+    this.assertRestartIdle();
 
-    this.updateShutdownScheduled = true;
     json(
       response,
       202,
@@ -704,13 +981,131 @@ export class ValBridgeServer {
       },
       headers,
     );
-    setTimeout(() => {
-      try {
-        this.onUpdateRequested?.();
-      } catch {
-        // The process-level shutdown handler owns restart failures.
+    this.scheduleRestart();
+  }
+
+  private async handleOpenAIProxy(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+    headers: Record<string, string>,
+  ) {
+    const release = this.semaphore.acquire();
+    const controller = new AbortController();
+    response.on("close", () => {
+      if (!response.writableEnded) controller.abort();
+    });
+
+    try {
+      const method = relayHttpMethod(request.method);
+      const path = validateOpenAIProxyPath(url.pathname);
+      const body = await readRawBody(request, this.config.bodyLimitBytes);
+      const relayRequest: RelayOpenAIHttpRequest = {
+        kind: "openai.http",
+        method,
+        path,
+        ...(url.search ? { query: url.search } : {}),
+        headers: requestHeadersForRelay(request.headers),
+        ...(body.length > 0
+          ? {
+              body: {
+                encoding: "base64",
+                data: body.toString("base64"),
+              } as const,
+            }
+          : {}),
+      };
+      await this.executeOpenAIProxy(
+        relayRequest,
+        response,
+        headers,
+        controller.signal,
+      );
+    } finally {
+      release();
+    }
+  }
+
+  private async executeOpenAIProxy(
+    request: RelayOpenAIHttpRequest,
+    response: ServerResponse,
+    headers: Record<string, string>,
+    signal: AbortSignal,
+  ) {
+    let responseStarted = false;
+    let responseHasNoBody = request.method === "HEAD";
+    try {
+      await this.hub.execute(
+        request,
+        {
+          onEvent: (event) => {
+            if (event.kind === "http.response") {
+              if (
+                responseStarted ||
+                !Number.isInteger(event.status) ||
+                event.status < 200 ||
+                event.status > 599
+              ) {
+                throw new OpenAIHttpError(
+                  502,
+                  "invalid_upstream_response",
+                  "The extension returned invalid HTTP response metadata.",
+                  "api_connection_error",
+                );
+              }
+              const upstreamHeaders = responseHeadersForClient(event.headers);
+              responseHasNoBody ||=
+                event.status === 204 || event.status === 304;
+              response.writeHead(event.status, {
+                ...upstreamHeaders,
+                "cache-control": upstreamHeaders["cache-control"] ?? "no-store",
+                "x-content-type-options": "nosniff",
+                ...headers,
+              });
+              responseStarted = true;
+              return;
+            }
+            if (event.kind === "http.chunk") {
+              if (!responseStarted || event.encoding !== "base64") {
+                throw new OpenAIHttpError(
+                  502,
+                  "invalid_upstream_response",
+                  "The extension returned an HTTP body before its response metadata.",
+                  "api_connection_error",
+                );
+              }
+              const chunk = decodeRelayChunk(event.data);
+              if (!responseHasNoBody && chunk.length > 0) {
+                response.write(chunk);
+              }
+              return;
+            }
+            throw new OpenAIHttpError(
+              502,
+              "invalid_upstream_response",
+              "The extension returned an event for the wrong relay type.",
+              "api_connection_error",
+            );
+          },
+        },
+        signal,
+        this.config.responseTimeoutMs,
+      );
+      if (!responseStarted) {
+        throw new OpenAIHttpError(
+          502,
+          "invalid_upstream_response",
+          "Val ended the HTTP relay without returning response metadata.",
+          "api_connection_error",
+        );
       }
-    }, 100).unref();
+      response.end();
+    } catch (error) {
+      if (responseStarted && !response.writableEnded) {
+        response.destroy(error instanceof Error ? error : undefined);
+      }
+      throw error;
+    }
   }
 
   private async handleModels(
@@ -753,9 +1148,50 @@ export class ValBridgeServer {
     });
 
     try {
-      body = parseChatCompletion(
-        await readJsonBody(request, this.config.bodyLimitBytes),
-      );
+      const rawBody = await readRawBody(request, this.config.bodyLimitBytes);
+      const rawPayload = parseJsonBuffer(rawBody);
+      const rawRecord = plainRecord(rawPayload);
+      if (rawRecord && chatNeedsHttpRelay(rawRecord)) {
+        await this.executeOpenAIProxy(
+          {
+            kind: "openai.http",
+            method: "POST",
+            path: "/v1/chat/completions",
+            headers: requestHeadersForRelay(request.headers),
+            body: {
+              encoding: "base64",
+              data: rawBody.toString("base64"),
+            },
+          },
+          response,
+          headers,
+          controller.signal,
+        );
+        outcome = "completed";
+        return;
+      }
+      try {
+        body = parseChatCompletion(rawPayload);
+      } catch (error) {
+        if (!rawRecord) throw error;
+        await this.executeOpenAIProxy(
+          {
+            kind: "openai.http",
+            method: "POST",
+            path: "/v1/chat/completions",
+            headers: requestHeadersForRelay(request.headers),
+            body: {
+              encoding: "base64",
+              data: rawBody.toString("base64"),
+            },
+          },
+          response,
+          headers,
+          controller.signal,
+        );
+        outcome = "completed";
+        return;
+      }
       const metadata = body.metadata as Record<string, unknown> | undefined;
       const requestedChatId =
         typeof metadata?.val_chat_id === "string"
@@ -888,6 +1324,7 @@ export class ValBridgeServer {
     let outcome: "completed" | "failed" | "cancelled" = "failed";
     let errorCode: string | undefined;
     let handledLegacy = false;
+    let handledProxy = false;
     let terminalEvent:
       | "response.completed"
       | "response.failed"
@@ -898,13 +1335,80 @@ export class ValBridgeServer {
     });
 
     try {
-      body = parseResponse(
-        await readJsonBody(request, this.config.bodyLimitBytes),
-      );
+      const rawBody = await readRawBody(request, this.config.bodyLimitBytes);
+      const rawPayload = parseJsonBuffer(rawBody);
+      const rawRecord = plainRecord(rawPayload);
+      const rawPreviousResponseId =
+        typeof rawRecord?.previous_response_id === "string"
+          ? rawRecord.previous_response_id
+          : undefined;
+      const rawPrior = rawPreviousResponseId
+        ? this.mappings.get(rawPreviousResponseId)
+        : undefined;
+      const hasSpecializedShape =
+        typeof rawRecord?.model === "string" &&
+        rawRecord.model.length > 0 &&
+        (typeof rawRecord.input === "string" || Array.isArray(rawRecord.input));
+      const needsLegacyMapping =
+        rawPrior?.chatId !== undefined &&
+        rawPrior.nativeResponseId === undefined;
+      if (
+        rawRecord &&
+        !hasSpecializedShape &&
+        !needsLegacyMapping &&
+        this.hub.supportsNativeResponses()
+      ) {
+        handledProxy = true;
+        await this.executeOpenAIProxy(
+          {
+            kind: "openai.http",
+            method: "POST",
+            path: "/v1/responses",
+            headers: requestHeadersForRelay(request.headers),
+            body: {
+              encoding: "base64",
+              data: rawBody.toString("base64"),
+            },
+          },
+          response,
+          headers,
+          controller.signal,
+        );
+        outcome = "completed";
+        return;
+      }
+      try {
+        body = parseResponse(rawPayload);
+      } catch (error) {
+        if (!rawRecord || !this.hub.supportsNativeResponses()) throw error;
+        handledProxy = true;
+        await this.executeOpenAIProxy(
+          {
+            kind: "openai.http",
+            method: "POST",
+            path: "/v1/responses",
+            headers: requestHeadersForRelay(request.headers),
+            body: {
+              encoding: "base64",
+              data: rawBody.toString("base64"),
+            },
+          },
+          response,
+          headers,
+          controller.signal,
+        );
+        outcome = "completed";
+        return;
+      }
       const prior = body.previous_response_id
         ? this.mappings.get(body.previous_response_id)
         : undefined;
-      if (body.previous_response_id && !prior) {
+      const nativePreviousResponseId =
+        prior?.nativeResponseId ??
+        (body.previous_response_id && this.hub.supportsNativeResponses()
+          ? body.previous_response_id
+          : undefined);
+      if (body.previous_response_id && !prior && !nativePreviousResponseId) {
         throw new OpenAIHttpError(
           404,
           "invalid_previous_response_id",
@@ -919,6 +1423,27 @@ export class ValBridgeServer {
           "native_responses_unavailable",
           "Reload the updated extension before continuing this response.",
           "api_connection_error",
+        );
+      }
+      if (body.background === true && !this.hub.supportsNativeResponses()) {
+        throw new OpenAIHttpError(
+          503,
+          "native_responses_unavailable",
+          "Background Responses require the native Val Responses relay.",
+          "api_connection_error",
+        );
+      }
+      if (
+        body.background === true &&
+        prior?.chatId &&
+        !prior.nativeResponseId
+      ) {
+        throw new OpenAIHttpError(
+          400,
+          "unsupported_feature",
+          "A background Response cannot continue a legacy Val chat mapping.",
+          "invalid_request_error",
+          "previous_response_id",
         );
       }
       if (prior?.chatId && !prior.nativeResponseId) {
@@ -947,19 +1472,39 @@ export class ValBridgeServer {
       }
 
       bridgeResponseId = `resp_${randomUUID().replaceAll("-", "")}`;
-      responseInputToMessages(body);
-      responseToolsToChatTools(body.tools);
       const relayBody = { ...body } as Record<string, unknown>;
       delete relayBody.previous_response_id;
-      relayBody.store = body.store || Boolean(prior?.nativeResponseId);
-      if (prior?.nativeResponseId) {
-        relayBody.previous_response_id = prior.nativeResponseId;
+      relayBody.store = body.store || Boolean(nativePreviousResponseId);
+      if (nativePreviousResponseId) {
+        relayBody.previous_response_id = nativePreviousResponseId;
+      }
+
+      if (body.background === true) {
+        handledProxy = true;
+        await this.executeOpenAIProxy(
+          {
+            kind: "openai.http",
+            method: "POST",
+            path: "/v1/responses",
+            headers: requestHeadersForRelay(request.headers),
+            body: {
+              encoding: "base64",
+              data: Buffer.from(JSON.stringify(relayBody)).toString("base64"),
+            },
+          },
+          response,
+          headers,
+          controller.signal,
+        );
+        outcome = "completed";
+        return;
       }
 
       const relayRequest = {
         kind: "responses" as const,
         model: body.model,
         body: relayBody as import("@val-bridge/protocol").JsonObject,
+        headers: requestHeadersForRelay(request.headers),
       };
 
       let sseStarted = false;
@@ -1039,7 +1584,7 @@ export class ValBridgeServer {
         }
         if (
           terminalEvent === "response.completed" &&
-          (body.store || prior?.nativeResponseId) &&
+          (body.store || nativePreviousResponseId) &&
           !mappedNativeId
         ) {
           throw new OpenAIHttpError(
@@ -1078,7 +1623,7 @@ export class ValBridgeServer {
       if (
         terminalEvent === "response.completed" &&
         mappedNativeId &&
-        (body.store || prior?.nativeResponseId)
+        (body.store || nativePreviousResponseId)
       ) {
         await this.mappings.setNative(mappedNativeId, mappedNativeId);
       }
@@ -1102,7 +1647,7 @@ export class ValBridgeServer {
       errorCode = error.code;
       throw rawError;
     } finally {
-      if (body && !handledLegacy) {
+      if (body && !handledLegacy && !handledProxy) {
         const output = Array.isArray(completedPayload?.output)
           ? completedPayload.output
           : [];

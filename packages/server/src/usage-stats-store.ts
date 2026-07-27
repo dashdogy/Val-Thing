@@ -99,6 +99,11 @@ export function normalizeUsageStatsSnapshot(
     if (counter === null) return null;
     snapshot[key] = counter;
   }
+  if ("resetAt" in value) {
+    const resetAt = safeCounter(value.resetAt);
+    if (resetAt === null) return null;
+    snapshot.resetAt = resetAt;
+  }
 
   if ("lastReasoningTokensReported" in value) {
     if (typeof value.lastReasoningTokensReported !== "boolean") return null;
@@ -130,12 +135,47 @@ function shouldReplace(
   incoming: UsageStatsSnapshot,
 ) {
   if (!current) return true;
-  if (current.requests > 0 && incoming.requests === 0) return false;
-  if (current.requests === 0 && incoming.requests > 0) return true;
+  if (current.requests > 0 && incoming.requests === 0) {
+    return Boolean(
+      incoming.resetAt && incoming.resetAt >= current.lastUpdatedAt,
+    );
+  }
+  if (current.requests === 0 && incoming.requests > 0) {
+    if (
+      current.resetAt &&
+      (incoming.startedAt < current.resetAt ||
+        incoming.lastUpdatedAt < current.resetAt)
+    ) {
+      return false;
+    }
+    return incoming.lastUpdatedAt >= current.lastUpdatedAt;
+  }
   if (incoming.lastUpdatedAt !== current.lastUpdatedAt) {
     return incoming.lastUpdatedAt > current.lastUpdatedAt;
   }
   return progress(incoming) >= progress(current);
+}
+
+export function emptyUsageStatsSnapshot(now = Date.now()): UsageStatsSnapshot {
+  return {
+    startedAt: now,
+    lastUpdatedAt: now,
+    resetAt: now,
+    requests: 0,
+    completedRequests: 0,
+    failedRequests: 0,
+    cancelledRequests: 0,
+    meteredRequests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    reasoningTokens: 0,
+    reasoningMeteredRequests: 0,
+    reasoningSummaryRequests: 0,
+    hiddenReasoningRequests: 0,
+    pricedRequests: 0,
+    estimatedOpenAICostNanodollars: 0,
+  };
 }
 
 export class UsageStatsStore {
@@ -176,16 +216,26 @@ export class UsageStatsStore {
     if (!snapshot) return false;
     if (!shouldReplace(this.current, snapshot)) return true;
 
+    this.setAndPersist(snapshot);
+    return true;
+  }
+
+  reset(now = Date.now()) {
+    const snapshot = emptyUsageStatsSnapshot(now);
+    this.setAndPersist(snapshot);
+    return { ...snapshot };
+  }
+
+  async flush() {
+    await this.lastWrite;
+  }
+
+  private setAndPersist(snapshot: UsageStatsSnapshot) {
     this.current = snapshot;
     const file: UsageStatsFile = { version: 1, stats: snapshot };
     const write = this.writeQueue.then(() => writeJsonAtomic(this.path, file));
     this.lastWrite = write;
     this.writeQueue = write.catch(() => undefined);
     void write.catch(() => undefined);
-    return true;
-  }
-
-  async flush() {
-    await this.lastWrite;
   }
 }

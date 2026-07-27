@@ -30,9 +30,12 @@ An installed OpenCode binary can be checked against the local API contract with:
 npm run verify:opencode
 ```
 
-The companion writes a bounded, sanitized `diagnostics.jsonl` file beside its
-local configuration. It records request outcomes and token counters, never
-prompts, responses, or credentials.
+The bridge follows current OpenAI JavaScript SDK v6 request and response shapes
+for capabilities exposed by the upstream service.
+
+The companion writes bounded, sanitized local diagnostics and aggregate usage
+totals. Diagnostics include request/model identifiers, outcomes, durations,
+and token counters, never prompts, responses, or credentials.
 
 Packaged builds are published through the repository's Releases page.
 Installed builds periodically check for a newer release and offer an in-app
@@ -42,7 +45,8 @@ update when one is available.
 npx --yes --allow-remote=all https://github.com/dashdogy/Val-Thing/releases/latest/download/install.tgz
 ```
 
-The companion listens on all IPv4 interfaces by default. Keep its API key
-private and use it only on a trusted network.
+The first companion launch uses trusted-LAN mode. Its popup can switch to
+device-only access, rotate the API key, and reset saved usage totals. LAN
+traffic is authenticated but not encrypted, so keep the key private.
 
 Use only with services and accounts you are authorized to access, and follow the applicable policies and terms.

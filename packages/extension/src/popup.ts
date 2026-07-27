@@ -1,9 +1,12 @@
 import { COMPANION_LAUNCH_URL } from "@val-bridge/protocol";
+import { GPT_56_PRICING_SNAPSHOT_DATE } from "./usage-stats.js";
 
 type PopupStatus = {
   bridgeConnected: boolean;
   bridgePaired: boolean;
   bridgeUrl: string;
+  networkScope: "unknown" | "loopback" | "lan";
+  clientIpAllowlist: boolean;
   clientApiKey?: string;
   valSession: boolean;
   valSocket: boolean;
@@ -63,6 +66,12 @@ const apiBase = element<HTMLElement>("#api-base");
 const apiKeyElement = element<HTMLElement>("#api-key");
 const toggleApiKeyButton = element<HTMLButtonElement>("#toggle-api-key");
 const copyApiKeyButton = element<HTMLButtonElement>("#copy-api-key");
+const rotateApiKeyButton = element<HTMLButtonElement>("#rotate-api-key");
+const networkScopeElement = element<HTMLElement>("#network-scope");
+const toggleNetworkScopeButton = element<HTMLButtonElement>(
+  "#toggle-network-scope",
+);
+const networkStatus = element<HTMLElement>("#network-status");
 const configureOpenCodeButton = element<HTMLButtonElement>(
   "#configure-opencode",
 );
@@ -85,6 +94,7 @@ const requestCount = element<HTMLElement>("#request-count");
 const estimatedCost = element<HTMLElement>("#estimated-cost");
 const costNote = element<HTMLElement>("#cost-note");
 const usageNote = element<HTMLElement>("#usage-note");
+const resetUsageButton = element<HTMLButtonElement>("#reset-usage");
 
 let urlEdited = false;
 let refreshPending = false;
@@ -95,6 +105,10 @@ let configurePending = false;
 let launchPending = false;
 let launchResetTimer: ReturnType<typeof setTimeout> | undefined;
 let updatePending = false;
+let rotatePending = false;
+let resetUsagePending = false;
+let networkPending = false;
+let currentNetworkScope: PopupStatus["networkScope"] = "unknown";
 
 function dot(element: HTMLElement, state: boolean | null) {
   element.classList.toggle("good", state === true);
@@ -118,6 +132,12 @@ const costFormatter = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 4,
   maximumFractionDigits: 8,
 });
+const pricingSnapshotDate = new Intl.DateTimeFormat("en-AU", {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  timeZone: "UTC",
+}).format(new Date(`${GPT_56_PRICING_SNAPSHOT_DATE}T00:00:00Z`));
 
 function tokenText(value: number, available: boolean) {
   return available ? numberFormatter.format(value) : "—";
@@ -188,10 +208,10 @@ function renderUsage(stats: PopupStatus["stats"]) {
   usageNote.textContent = `${usageDetail} · saved to companion disk`;
   costNote.textContent =
     stats.requests === 0 || stats.pricedRequests === stats.meteredRequests
-      ? "OpenAI-equivalent estimate · not a Val charge"
+      ? `OpenAI-equivalent estimate · rates ${pricingSnapshotDate} · not a Val charge`
       : stats.pricedRequests === 0
         ? "No priced GPT-5.6 usage reported yet"
-        : `${numberFormatter.format(stats.pricedRequests)} of ${numberFormatter.format(stats.meteredRequests)} metered requests matched GPT-5.6 pricing`;
+        : `${numberFormatter.format(stats.pricedRequests)} of ${numberFormatter.format(stats.meteredRequests)} metered requests matched the ${pricingSnapshotDate} GPT-5.6 rates`;
 }
 
 function renderApiKey(apiKey?: string) {
@@ -217,8 +237,41 @@ function renderApiKey(apiKey?: string) {
   );
   toggleApiKeyButton.disabled = !available;
   copyApiKeyButton.disabled = !available;
+  rotateApiKeyButton.disabled = !available || rotatePending;
   toggleApiKeyButton.textContent = apiKeyVisible ? "Hide" : "Show";
   toggleApiKeyButton.setAttribute("aria-pressed", String(apiKeyVisible));
+}
+
+function renderNetwork(status: PopupStatus) {
+  const scope = status.networkScope;
+  currentNetworkScope = scope;
+  networkScopeElement.textContent =
+    scope === "lan"
+      ? "Trusted LAN"
+      : scope === "loopback"
+        ? "This device only"
+        : "Unavailable";
+  networkScopeElement.classList.toggle("lan", scope === "lan");
+  toggleNetworkScopeButton.disabled =
+    networkPending || !status.bridgeConnected || scope === "unknown";
+  toggleNetworkScopeButton.textContent = networkPending
+    ? "Restarting companion..."
+    : scope === "lan"
+      ? "Use this device only"
+      : "Enable trusted LAN";
+  if (networkPending) {
+    networkStatus.textContent =
+      "Applying the setting and restarting the companion...";
+  } else if (scope === "lan") {
+    networkStatus.textContent = status.clientIpAllowlist
+      ? "LAN clients require the API key and an allowed IP address."
+      : "LAN clients require the API key; HTTP traffic is unencrypted.";
+  } else if (scope === "loopback") {
+    networkStatus.textContent = "Only applications on this device can connect.";
+  } else {
+    networkStatus.textContent =
+      "Connect the companion to inspect network access.";
+  }
 }
 
 function renderUpdate(update: PopupStatus["update"], bridgeConnected: boolean) {
@@ -308,6 +361,11 @@ async function refresh() {
     unpairButton.hidden = !status.bridgePaired;
     apiBase.textContent = `${status.bridgeUrl}/v1`;
     renderApiKey(status.clientApiKey);
+    renderNetwork(status);
+    resetUsageButton.disabled =
+      resetUsagePending ||
+      !status.bridgeConnected ||
+      status.stats.activeRequests > 0;
     configureOpenCodeButton.disabled =
       configurePending ||
       !status.bridgeConnected ||
@@ -401,6 +459,88 @@ copyApiKeyButton.addEventListener("click", async () => {
     }, 1_500);
   } catch (error) {
     showError(`Could not copy the API key: ${errorMessage(error)}`);
+  }
+});
+
+rotateApiKeyButton.addEventListener("click", async () => {
+  if (
+    !window.confirm(
+      "Rotate the client API key? Existing OpenCode and LAN clients will stop working until reconfigured.",
+    )
+  ) {
+    return;
+  }
+  rotatePending = true;
+  rotateApiKeyButton.disabled = true;
+  rotateApiKeyButton.textContent = "Rotating...";
+  showError();
+  try {
+    await message({ type: "POPUP_ROTATE_API_KEY" });
+    apiKeyVisible = false;
+    openCodeStatus.textContent =
+      "API key rotated. Reconfigure OpenCode and other clients.";
+  } catch (error) {
+    showError(errorMessage(error));
+  } finally {
+    rotatePending = false;
+    rotateApiKeyButton.textContent = "Rotate";
+    await refresh();
+  }
+});
+
+resetUsageButton.addEventListener("click", async () => {
+  if (!window.confirm("Reset all saved request, token, and cost totals?")) {
+    return;
+  }
+  resetUsagePending = true;
+  resetUsageButton.disabled = true;
+  resetUsageButton.textContent = "Resetting...";
+  showError();
+  try {
+    await message({ type: "POPUP_RESET_USAGE" });
+  } catch (error) {
+    showError(errorMessage(error));
+  } finally {
+    resetUsagePending = false;
+    resetUsageButton.textContent = "Reset usage totals";
+    await refresh();
+  }
+});
+
+toggleNetworkScopeButton.addEventListener("click", async () => {
+  const enableLan = currentNetworkScope !== "lan";
+  if (
+    enableLan &&
+    !window.confirm(
+      "Enable trusted LAN access? Prompts and responses can cross your local network over unencrypted HTTP and still require the API key.",
+    )
+  ) {
+    return;
+  }
+  networkPending = true;
+  toggleNetworkScopeButton.disabled = true;
+  showError();
+  try {
+    const response = await message<{
+      ok: true;
+      result: {
+        scope: "loopback" | "lan";
+        restarting: boolean;
+        restartRequired?: boolean;
+      };
+    }>({
+      type: "POPUP_SET_NETWORK_SCOPE",
+      scope: enableLan ? "lan" : "loopback",
+    });
+    if (response.result.restartRequired && !response.result.restarting) {
+      networkStatus.textContent =
+        "Setting saved. Restart the companion to apply it.";
+    }
+  } catch (error) {
+    showError(errorMessage(error));
+  } finally {
+    networkPending = false;
+    await refresh();
   }
 });
 

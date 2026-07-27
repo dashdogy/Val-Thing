@@ -6,6 +6,8 @@ import test from "node:test";
 import { parse } from "jsonc-parser";
 import {
   configureOpenCode,
+  modelTokenLimits,
+  openCodeModel,
   openAIModelCapabilities,
   reasoningCapabilitiesForModel,
   reasoningLevelsForModel,
@@ -86,7 +88,18 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
     Object.keys(
       models["openai-gpt-5.6-luna"]?.variants as Record<string, unknown>,
     ),
-    ["low", "medium", "high", "xhigh", "max", "max-detailed"],
+    ["none", "low", "medium", "high", "xhigh", "max", "max-detailed"],
+  );
+  assert.deepEqual(
+    (
+      models["openai-gpt-5.6-luna"]?.variants as Record<
+        string,
+        Record<string, unknown>
+      >
+    ).none,
+    {
+      reasoningEffort: "none",
+    },
   );
   assert.deepEqual(
     (
@@ -236,10 +249,12 @@ test("uses GPT-5.6 family defaults only when Val exposes no capability metadata"
       id: "openai-gpt-5.6-terra",
     }),
     {
-      levels: ["low", "medium", "high", "xhigh", "max"],
+      levels: ["none", "low", "medium", "high", "xhigh", "max"],
       summaryModes: ["auto", "detailed"],
+      modes: ["standard"],
       effortSource: "gpt_5_6_family",
       summarySource: "gpt_5_6_family",
+      modeSource: "gpt_5_6_family",
     },
   );
 });
@@ -270,8 +285,60 @@ test("honors explicit reasoning and summary capability restrictions", () => {
   assert.deepEqual(reasoningCapabilitiesForModel(explicit), {
     levels: ["high", "max"],
     summaryModes: ["auto"],
+    modes: ["standard"],
     effortSource: "val_metadata",
     summarySource: "val_metadata",
+    modeSource: "gpt_5_6_family",
+  });
+});
+
+test("exports pro variants only when Val exposes GPT-5.6 pro mode", () => {
+  const model = openCodeModel({
+    id: "openai-gpt-5.6-sol",
+    features: {
+      chat: {
+        settings: {
+          reasoning_effort: { values: ["none", "high", "max"] },
+          reasoning_summary: { values: ["auto"] },
+          reasoning_mode: { values: ["standard", "pro"] },
+        },
+      },
+    },
+  });
+  const variants = model.variants as Record<string, Record<string, unknown>>;
+
+  assert.deepEqual(
+    reasoningCapabilitiesForModel({
+      id: "openai-gpt-5.6-sol",
+      features: {
+        chat: {
+          settings: {
+            reasoning_effort: { values: ["none", "high", "max"] },
+            reasoning_summary: { values: ["auto"] },
+            reasoning_mode: { values: ["standard", "pro"] },
+          },
+        },
+      },
+    }),
+    {
+      levels: ["none", "high", "max"],
+      summaryModes: ["auto"],
+      modes: ["standard", "pro"],
+      effortSource: "val_metadata",
+      summarySource: "val_metadata",
+      modeSource: "val_metadata",
+    },
+  );
+  assert.deepEqual(variants["pro-none"], {
+    reasoningEffort: "none",
+    reasoningMode: "pro",
+  });
+  assert.deepEqual(variants["pro-max"], {
+    reasoningEffort: "max",
+    reasoningSummary: "auto",
+    include: ["reasoning.encrypted_content"],
+    reasoningContext: "all_turns",
+    reasoningMode: "pro",
   });
 });
 
@@ -295,11 +362,75 @@ test("advertises context and reasoning evidence without exposing raw model data"
         reasoning: true,
         reasoning_efforts: ["low", "max"],
         reasoning_summaries: ["auto", "detailed"],
+        reasoning_modes: ["standard"],
+        token_limits: {
+          context: "gpt_5_6_family",
+          output: "gpt_5_6_family",
+        },
         evidence: {
           effort: "val_metadata",
           summary: "val_metadata",
+          mode: "gpt_5_6_family",
         },
       },
+    },
+  );
+});
+
+test("prefers live Val token limits over GPT-5.6 family fallbacks", () => {
+  const model = {
+    id: "openai-gpt-5.6-sol",
+    info: {
+      capabilities: {
+        token_limits: {
+          context_window: "2000000",
+          max_output_tokens: 256_000,
+        },
+      },
+      max_tokens: 42,
+    },
+  };
+
+  assert.deepEqual(modelTokenLimits(model), {
+    context: 2_000_000,
+    output: 256_000,
+    contextSource: "val_metadata",
+    outputSource: "val_metadata",
+  });
+  assert.deepEqual(
+    openCodeModel(model).limit as Record<string, number> | undefined,
+    { context: 2_000_000, output: 256_000 },
+  );
+  assert.deepEqual(openAIModelCapabilities(model), {
+    context_window: 2_000_000,
+    max_output_tokens: 256_000,
+    val_capabilities: {
+      reasoning: true,
+      reasoning_efforts: ["none", "low", "medium", "high", "xhigh", "max"],
+      reasoning_summaries: ["auto", "detailed"],
+      reasoning_modes: ["standard"],
+      token_limits: {
+        context: "val_metadata",
+        output: "val_metadata",
+      },
+      evidence: {
+        effort: "gpt_5_6_family",
+        summary: "gpt_5_6_family",
+        mode: "gpt_5_6_family",
+      },
+    },
+  });
+});
+
+test("does not infer a context limit from an ambiguous max_tokens field", () => {
+  assert.deepEqual(
+    modelTokenLimits({
+      id: "other-model",
+      info: { max_tokens: 999_999 },
+    }),
+    {
+      contextSource: "none",
+      outputSource: "none",
     },
   );
 });

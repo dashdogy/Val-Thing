@@ -4,6 +4,7 @@ import type {
   OpenAIToolCall,
   ValRelayEvent,
 } from "@val-bridge/protocol";
+import { collapseRepeatedJson } from "@val-bridge/protocol";
 import {
   assistantTextFromContent,
   reasoningTextFromRecord,
@@ -80,21 +81,6 @@ function mergeArgumentFragment(tool: MutableToolCall, incoming: string) {
   }
   tool.function.arguments += incoming;
   return incoming;
-}
-
-function collapseRepeatedJson(value: string) {
-  for (let length = 1; length <= value.length / 2; length += 1) {
-    if (value.length % length !== 0) continue;
-    const candidate = value.slice(0, length);
-    if (candidate.repeat(value.length / length) !== value) continue;
-    try {
-      JSON.parse(candidate);
-      return candidate;
-    } catch {
-      // Continue looking for a larger valid JSON period.
-    }
-  }
-  return value;
 }
 
 export class ChatAccumulator {
@@ -175,6 +161,9 @@ export class ChatAccumulator {
     if (event.kind === "replace") {
       this.rawContentValue = event.content;
       return this.applyParsedContent();
+    }
+    if (event.kind === "http.response" || event.kind === "http.chunk") {
+      return [];
     }
 
     const data = event.data as Record<string, unknown>;

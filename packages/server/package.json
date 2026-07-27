@@ -1,6 +1,6 @@
 {
   "name": "@val-bridge/server",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +20,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/ws": "^8.18.1",
-    "openai": "^5.10.0",
+    "openai": "^6.49.0",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   },

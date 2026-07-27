@@ -62,6 +62,23 @@ export type InstallResult = InstalledState & {
   releaseUrl?: string;
 };
 
+export type InstallCommitStage =
+  | "version"
+  | "extension"
+  | "start"
+  | "update"
+  | "shell-start"
+  | "shell-update"
+  | "macos-start"
+  | "windows-start"
+  | "windows-update"
+  | "current"
+  | "reload-marker";
+
+export type InstallTransactionHooks = {
+  afterCommit?: (stage: InstallCommitStage) => void | Promise<void>;
+};
+
 const silentLogger: Logger = {
   log() {},
   warn() {},
@@ -91,23 +108,6 @@ async function readJson(path: string) {
   return JSON.parse(
     (await readFile(path, "utf8")).replace(/^\uFEFF/, ""),
   ) as unknown;
-}
-
-async function writeAtomic(path: string, contents: string) {
-  const temporary = `${path}.${randomUUID().replaceAll("-", "")}.tmp`;
-  await writeFile(temporary, contents, "utf8");
-  try {
-    await rename(temporary, path);
-  } catch (error) {
-    if (
-      (error as NodeJS.ErrnoException).code !== "EEXIST" &&
-      (error as NodeJS.ErrnoException).code !== "EPERM"
-    ) {
-      throw error;
-    }
-    await rm(path, { force: true });
-    await rename(temporary, path);
-  }
 }
 
 async function acquireInstallLock(root: string) {
@@ -313,75 +313,68 @@ async function validatePayload(payloadRoot: string, release: ResolvedRelease) {
   }
 }
 
-async function installVersion(
+type SwapOperation = {
+  stage: InstallCommitStage;
+  target: string;
+  staged: string;
+  backup: string;
+  previousMoved: boolean;
+  committed: boolean;
+};
+
+async function rollbackInstall(
+  installRoot: string,
+  operations: SwapOperation[],
+) {
+  const failures: unknown[] = [];
+  for (const operation of operations.toReversed()) {
+    try {
+      if (operation.committed && (await exists(operation.target))) {
+        await safeRemove(installRoot, operation.target);
+      }
+      if (operation.previousMoved && (await exists(operation.backup))) {
+        await rename(operation.backup, operation.target);
+      }
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  return failures;
+}
+
+export async function installVersion(
   payloadRoot: string,
   release: ResolvedRelease,
   installRoot: string,
+  hooks: InstallTransactionHooks = {},
 ) {
   const paths = runtimePaths(installRoot);
+  await mkdir(paths.runtime, { recursive: true });
   await mkdir(paths.versions, { recursive: true });
   const versionRoot = safeChild(
     paths.versions,
     join(paths.versions, release.version),
   );
-  const nextVersion = safeChild(
-    paths.versions,
+  const transactionRoot = safeChild(
+    paths.root,
     join(
-      paths.versions,
-      `.next-${release.version}-${randomUUID().replaceAll("-", "")}`,
+      paths.root,
+      `.install-transaction-${release.version}-${randomUUID().replaceAll("-", "")}`,
     ),
   );
-  await mkdir(nextVersion, { recursive: true });
-  try {
-    for (const name of [
-      "server.mjs",
-      "launcher.mjs",
-      "update.mjs",
-      "version.json",
-    ]) {
-      await copyFile(join(payloadRoot, name), join(nextVersion, name));
-    }
-    await safeRemove(paths.versions, versionRoot);
-    await rename(nextVersion, versionRoot);
-  } catch (error) {
-    await safeRemove(paths.versions, nextVersion);
-    throw error;
-  }
-
-  const extensionNext = safeChild(
-    paths.runtime,
-    join(paths.runtime, `.extension-next-${randomUUID().replaceAll("-", "")}`),
-  );
-  const extensionPrevious = safeChild(
-    paths.runtime,
-    join(paths.runtime, ".extension-previous"),
-  );
-  await cp(join(payloadRoot, "extension"), extensionNext, {
-    recursive: true,
-  });
-  await safeRemove(paths.runtime, extensionPrevious);
-  let previousMoved = false;
-  try {
-    if (await exists(paths.extension)) {
-      await rename(paths.extension, extensionPrevious);
-      previousMoved = true;
-    }
-    await rename(extensionNext, paths.extension);
-    await safeRemove(paths.runtime, extensionPrevious);
-  } catch (error) {
-    await safeRemove(paths.runtime, extensionNext);
-    if (
-      previousMoved &&
-      !(await exists(paths.extension)) &&
-      (await exists(extensionPrevious))
-    ) {
-      await rename(extensionPrevious, paths.extension);
-    }
-    throw error;
-  }
-
-  await copyFile(join(versionRoot, "launcher.mjs"), paths.start);
-  await copyFile(join(versionRoot, "update.mjs"), paths.update);
+  const stagedRoot = join(transactionRoot, "next");
+  const backupRoot = join(transactionRoot, "previous");
+  const stagedVersion = join(stagedRoot, "version");
+  const stagedExtension = join(stagedRoot, "extension");
+  const stagedStart = join(stagedRoot, "start.mjs");
+  const stagedUpdate = join(stagedRoot, "update.mjs");
+  const stagedShellStart = join(stagedRoot, "start-val-bridge");
+  const stagedShellUpdate = join(stagedRoot, "update-val-bridge");
+  const stagedMacStart = join(stagedRoot, "Start Val Bridge.command");
+  const stagedWindowsStart = join(stagedRoot, "Start Val Bridge.cmd");
+  const stagedWindowsUpdate = join(stagedRoot, "Update Val Bridge.cmd");
+  const stagedCurrent = join(stagedRoot, "current.json");
+  const stagedReloadMarker = join(stagedRoot, "reload-extension");
   const shellStart = `#!/bin/sh
 SCRIPT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
 exec node "$SCRIPT_DIR/start.mjs" "$@"
@@ -390,28 +383,6 @@ exec node "$SCRIPT_DIR/start.mjs" "$@"
 SCRIPT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
 exec node "$SCRIPT_DIR/update.mjs" "$@"
 `;
-  await writeAtomic(join(paths.runtime, "start-val-bridge"), shellStart);
-  await writeAtomic(join(paths.runtime, "update-val-bridge"), shellUpdate);
-  await writeAtomic(
-    join(paths.runtime, "Start Val Bridge.command"),
-    shellStart,
-  );
-  await writeAtomic(
-    join(paths.runtime, "Start Val Bridge.cmd"),
-    '@echo off\r\nnode "%~dp0start.mjs" %*\r\n',
-  );
-  await writeAtomic(
-    join(paths.runtime, "Update Val Bridge.cmd"),
-    '@echo off\r\nnode "%~dp0update.mjs" %*\r\n',
-  );
-  if (process.platform !== "win32") {
-    await Promise.all([
-      chmod(join(paths.runtime, "start-val-bridge"), 0o755),
-      chmod(join(paths.runtime, "update-val-bridge"), 0o755),
-      chmod(join(paths.runtime, "Start Val Bridge.command"), 0o755),
-    ]);
-  }
-
   const current: CurrentInstall = {
     version: release.version,
     installed_at: new Date().toISOString(),
@@ -419,8 +390,171 @@ exec node "$SCRIPT_DIR/update.mjs" "$@"
     extension: relative(paths.runtime, paths.extension),
     source: release.source,
   };
-  await writeAtomic(paths.current, `${JSON.stringify(current, null, 2)}\n`);
-  await writeFile(paths.reloadMarker, "reload\n", "utf8");
+  const operations: SwapOperation[] = [
+    {
+      stage: "version",
+      target: versionRoot,
+      staged: stagedVersion,
+      backup: join(backupRoot, "version"),
+      previousMoved: false,
+      committed: false,
+    },
+    {
+      stage: "extension",
+      target: paths.extension,
+      staged: stagedExtension,
+      backup: join(backupRoot, "extension"),
+      previousMoved: false,
+      committed: false,
+    },
+    {
+      stage: "start",
+      target: paths.start,
+      staged: stagedStart,
+      backup: join(backupRoot, "start.mjs"),
+      previousMoved: false,
+      committed: false,
+    },
+    {
+      stage: "update",
+      target: paths.update,
+      staged: stagedUpdate,
+      backup: join(backupRoot, "update.mjs"),
+      previousMoved: false,
+      committed: false,
+    },
+    {
+      stage: "shell-start",
+      target: join(paths.runtime, "start-val-bridge"),
+      staged: stagedShellStart,
+      backup: join(backupRoot, "start-val-bridge"),
+      previousMoved: false,
+      committed: false,
+    },
+    {
+      stage: "shell-update",
+      target: join(paths.runtime, "update-val-bridge"),
+      staged: stagedShellUpdate,
+      backup: join(backupRoot, "update-val-bridge"),
+      previousMoved: false,
+      committed: false,
+    },
+    {
+      stage: "macos-start",
+      target: join(paths.runtime, "Start Val Bridge.command"),
+      staged: stagedMacStart,
+      backup: join(backupRoot, "Start Val Bridge.command"),
+      previousMoved: false,
+      committed: false,
+    },
+    {
+      stage: "windows-start",
+      target: join(paths.runtime, "Start Val Bridge.cmd"),
+      staged: stagedWindowsStart,
+      backup: join(backupRoot, "Start Val Bridge.cmd"),
+      previousMoved: false,
+      committed: false,
+    },
+    {
+      stage: "windows-update",
+      target: join(paths.runtime, "Update Val Bridge.cmd"),
+      staged: stagedWindowsUpdate,
+      backup: join(backupRoot, "Update Val Bridge.cmd"),
+      previousMoved: false,
+      committed: false,
+    },
+    {
+      stage: "current",
+      target: paths.current,
+      staged: stagedCurrent,
+      backup: join(backupRoot, "current.json"),
+      previousMoved: false,
+      committed: false,
+    },
+    {
+      stage: "reload-marker",
+      target: paths.reloadMarker,
+      staged: stagedReloadMarker,
+      backup: join(backupRoot, "reload-extension"),
+      previousMoved: false,
+      committed: false,
+    },
+  ];
+  const activeOperations: SwapOperation[] = [];
+
+  try {
+    await mkdir(stagedVersion, { recursive: true });
+    await mkdir(backupRoot, { recursive: true });
+    for (const name of [
+      "server.mjs",
+      "launcher.mjs",
+      "update.mjs",
+      "version.json",
+    ]) {
+      await copyFile(join(payloadRoot, name), join(stagedVersion, name));
+    }
+    await cp(join(payloadRoot, "extension"), stagedExtension, {
+      recursive: true,
+    });
+    await copyFile(join(stagedVersion, "launcher.mjs"), stagedStart);
+    await copyFile(join(stagedVersion, "update.mjs"), stagedUpdate);
+    await writeFile(stagedShellStart, shellStart, "utf8");
+    await writeFile(stagedShellUpdate, shellUpdate, "utf8");
+    await writeFile(stagedMacStart, shellStart, "utf8");
+    await writeFile(
+      stagedWindowsStart,
+      '@echo off\r\nnode "%~dp0start.mjs" %*\r\n',
+      "utf8",
+    );
+    await writeFile(
+      stagedWindowsUpdate,
+      '@echo off\r\nnode "%~dp0update.mjs" %*\r\n',
+      "utf8",
+    );
+    await writeFile(
+      stagedCurrent,
+      `${JSON.stringify(current, null, 2)}\n`,
+      "utf8",
+    );
+    await writeFile(stagedReloadMarker, "reload\n", "utf8");
+    if (process.platform !== "win32") {
+      await Promise.all([
+        chmod(stagedShellStart, 0o755),
+        chmod(stagedShellUpdate, 0o755),
+        chmod(stagedMacStart, 0o755),
+      ]);
+    }
+
+    for (const operation of operations) {
+      activeOperations.push(operation);
+      if (await exists(operation.target)) {
+        await rename(operation.target, operation.backup);
+        operation.previousMoved = true;
+      }
+      await rename(operation.staged, operation.target);
+      operation.committed = true;
+      await hooks.afterCommit?.(operation.stage);
+    }
+
+    const installed = await readInstalledState(installRoot);
+    if (!installed || installed.version !== release.version) {
+      throw new Error("The installed runtime failed validation.");
+    }
+  } catch (error) {
+    const rollbackFailures = await rollbackInstall(
+      paths.root,
+      activeOperations,
+    );
+    if (rollbackFailures.length > 0) {
+      throw new AggregateError(
+        [error, ...rollbackFailures],
+        `The update failed and could not be fully rolled back. Recovery files remain in ${transactionRoot}.`,
+      );
+    }
+    await safeRemove(paths.root, transactionRoot);
+    throw error;
+  }
+  await safeRemove(paths.root, transactionRoot);
 }
 
 export async function installLatest(

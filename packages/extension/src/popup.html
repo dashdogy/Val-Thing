@@ -104,11 +104,14 @@
           <strong id="estimated-cost">USD 0.0000</strong>
         </div>
         <p class="usage-cost-note" id="cost-note">
-          OpenAI-equivalent estimate · not a Val charge
+          OpenAI-equivalent estimate · rates 24 Jul 2026 · not a Val charge
         </p>
         <p class="usage-note" id="usage-note">
           Saved to companion disk when connected
         </p>
+        <button class="usage-reset" id="reset-usage" type="button">
+          Reset usage totals
+        </button>
       </section>
 
       <form id="pairing-panel">
@@ -159,11 +162,30 @@
               <button class="credential-action" id="copy-api-key" type="button">
                 Copy
               </button>
+              <button
+                class="credential-action danger-action"
+                id="rotate-api-key"
+                type="button"
+              >
+                Rotate
+              </button>
             </div>
           </div>
           <code class="api-key" id="api-key" aria-live="polite"
             >Connect companion</code
           >
+        </div>
+        <div class="endpoint-block network-config">
+          <div class="credential-heading">
+            <span class="endpoint-title">Network access</span>
+            <strong id="network-scope">Checking</strong>
+          </div>
+          <button id="toggle-network-scope" type="button" disabled>
+            Change network access
+          </button>
+          <p id="network-status" aria-live="polite">
+            LAN mode uses authenticated but unencrypted HTTP.
+          </p>
         </div>
         <div class="endpoint-block opencode-config">
           <button id="configure-opencode" type="button" disabled>
