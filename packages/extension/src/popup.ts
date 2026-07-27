@@ -20,6 +20,11 @@ type PopupStatus = {
     releaseUrl?: string;
     message?: string;
   };
+  openCodeAutoConfig: {
+    pending: boolean;
+    attempts: number;
+    lastError?: string;
+  };
   stats: {
     requests: number;
     completedRequests: number;
@@ -109,6 +114,7 @@ let rotatePending = false;
 let resetUsagePending = false;
 let networkPending = false;
 let currentNetworkScope: PopupStatus["networkScope"] = "unknown";
+let renderedAutoConfigPending = false;
 
 function dot(element: HTMLElement, state: boolean | null) {
   element.classList.toggle("good", state === true);
@@ -300,6 +306,35 @@ function renderUpdate(update: PopupStatus["update"], bridgeConnected: boolean) {
       : "Launch the companion before applying this update.";
 }
 
+function renderOpenCodeAutoConfig(status: PopupStatus) {
+  if (configurePending) return;
+  const migration = status.openCodeAutoConfig;
+  if (migration.pending) {
+    renderedAutoConfigPending = true;
+    configureOpenCodeButton.textContent = "Configure now";
+    const ready =
+      status.bridgeConnected &&
+      status.valSession &&
+      status.valSocket &&
+      status.compatible;
+    openCodeStatus.textContent =
+      migration.attempts > 0
+        ? `Automatic refresh will retry: ${
+            migration.lastError ?? "temporary configuration failure"
+          }`
+        : ready
+          ? "Refreshing OpenCode automatically for this update…"
+          : "Waiting for the companion and Val before refreshing automatically.";
+    return;
+  }
+  if (renderedAutoConfigPending) {
+    renderedAutoConfigPending = false;
+    configureOpenCodeButton.textContent = "Configure OpenCode";
+    openCodeStatus.textContent =
+      "Refreshes automatically after updates; rerun anytime.";
+  }
+}
+
 async function message<T>(payload: Record<string, unknown>): Promise<T> {
   const result: unknown = await chrome.runtime.sendMessage(payload);
   if (result && typeof result === "object") {
@@ -373,6 +408,7 @@ async function refresh() {
       !status.valSocket ||
       !status.compatible ||
       !status.clientApiKey;
+    renderOpenCodeAutoConfig(status);
     renderUpdate(status.update, status.bridgeConnected);
     renderUsage(status.stats);
     showError(status.lastError ?? "");
@@ -560,6 +596,7 @@ configureOpenCodeButton.addEventListener("click", async () => {
       };
     }>({ type: "POPUP_CONFIGURE_OPENCODE" });
     const count = response.result.modelsConfigured;
+    renderedAutoConfigPending = false;
     configureOpenCodeButton.textContent = "Configured";
     openCodeStatus.textContent = response.result.updated
       ? `Configured ${numberFormatter.format(count)} model${count === 1 ? "" : "s"}. Restart OpenCode to apply it.`
@@ -580,7 +617,7 @@ pairingPanel.addEventListener("submit", async (event) => {
   showError();
   try {
     if (!/^\d{6}$/.test(codeInput.value.trim())) {
-      throw new Error("Enter the six-digit code printed by the companion.");
+      throw new Error("Enter the six-digit code shown by the companion.");
     }
     await message({
       type: "POPUP_PAIR",

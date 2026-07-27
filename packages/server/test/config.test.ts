@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { loadRuntimeConfig } from "../src/config.js";
-import { clientIpAllowed, normalizeRemoteAddress } from "../src/server.js";
+import {
+  clientIpAllowed,
+  isLoopbackAddress,
+  normalizeRemoteAddress,
+} from "../src/server.js";
 
 test("defaults to the maximum of 16 concurrent requests", () => {
   const original = process.env.VAL_BRIDGE_MAX_CONCURRENCY;
@@ -35,6 +39,10 @@ test("validates exact client IP allowlists while always allowing loopback", () =
       ["192.0.2.10", "2001:db8::10"],
     );
     assert.equal(normalizeRemoteAddress("::ffff:192.0.2.10"), "192.0.2.10");
+    assert.equal(isLoopbackAddress("127.0.0.1"), true);
+    assert.equal(isLoopbackAddress("::ffff:127.0.0.1"), true);
+    assert.equal(isLoopbackAddress("::1"), true);
+    assert.equal(isLoopbackAddress("192.0.2.10"), false);
     const allowed = new Set(["192.0.2.10"]);
     assert.equal(clientIpAllowed("127.0.0.1", allowed), true);
     assert.equal(clientIpAllowed("192.0.2.10", allowed), true);

@@ -19,6 +19,7 @@ import {
   type FormattingOptions,
   type ParseError,
 } from "jsonc-parser";
+import { openAIModelIdForVal } from "./model-ids.js";
 
 const PROVIDER_ID = "val";
 const REASONING_LEVELS = [
@@ -47,6 +48,11 @@ const GPT_56_DEFAULT_REASONING_LEVELS = [
 const GPT_56_CONTEXT_TOKENS = 1_050_000;
 const GPT_56_OUTPUT_TOKENS = 128_000;
 const GPT_56_MODEL_PATTERN = /(?:^|[-_:/])gpt[-_]?5\.6(?:[-_:/]|$)/i;
+const GPT_56_SOL_MODEL_PATTERN = /gpt[-_]?5\.6[-_:/]sol$/i;
+const GPT_56_SOL_PRO_EFFORTS = ["medium", "high", "xhigh", "max"] as const;
+const GPT_56_SOL_PRO_DEFAULT_EFFORT = GPT_56_SOL_PRO_EFFORTS[0];
+const GPT_56_SOL_PRO_NAME = "OpenAI GPT-5.6 Sol Pro";
+const OPENAI_PRIORITY_SERVICE_TIER = "priority";
 
 type JsonRecord = Record<string, unknown>;
 type CapabilitySource =
@@ -471,7 +477,6 @@ function modelFamily(model: ValModel) {
 function reasoningVariant(
   level: (typeof REASONING_LEVELS)[number],
   summarySupported: boolean,
-  mode?: (typeof REASONING_MODES)[number],
 ) {
   return {
     reasoningEffort: level,
@@ -482,7 +487,6 @@ function reasoningVariant(
         : {}),
     ...(level === "max" ? { include: ["reasoning.encrypted_content"] } : {}),
     ...(level === "none" ? {} : { reasoningContext: "all_turns" }),
-    ...(mode ? { reasoningMode: mode } : {}),
   };
 }
 
@@ -497,13 +501,6 @@ export function openCodeModel(model: ValModel) {
   const variants: Record<string, Record<string, unknown>> = {};
   for (const level of reasoningLevels) {
     variants[level] = reasoningVariant(level, summarySupported);
-    if (reasoningCapabilities.modes.includes("pro")) {
-      variants[`pro-${level}`] = reasoningVariant(
-        level,
-        summarySupported,
-        "pro",
-      );
-    }
     if (
       level === "max" &&
       reasoningCapabilities.summaryModes.includes("detailed")
@@ -516,7 +513,16 @@ export function openCodeModel(model: ValModel) {
       };
     }
   }
+  if (reasoningLevels.length > 0 && isOpenAIGpt56Model(model)) {
+    for (const level of GPT_56_DEFAULT_REASONING_LEVELS) {
+      variants[`priority-${level}`] = {
+        ...reasoningVariant(level, summarySupported),
+        serviceTier: OPENAI_PRIORITY_SERVICE_TIER,
+      };
+    }
+  }
   return {
+    id: openAIModelIdForVal(model.id),
     name: displayName(model),
     ...(family ? { family } : {}),
     ...(tokenLimits.context !== undefined || tokenLimits.output !== undefined
@@ -545,6 +551,41 @@ export function openCodeModel(model: ValModel) {
       output: ["text"],
     },
   };
+}
+
+function isOpenAIGpt56SolModel(model: ValModel) {
+  return GPT_56_SOL_MODEL_PATTERN.test(model.id);
+}
+
+function openCodeSolProModel(model: ValModel): JsonRecord | undefined {
+  const reasoning = reasoningCapabilitiesForModel(model);
+  if (!isOpenAIGpt56SolModel(model) || reasoning.levels.length === 0) {
+    return undefined;
+  }
+
+  const summarySupported =
+    reasoning.summaryModes.includes("auto") ||
+    reasoning.summaryModes.includes("detailed");
+  const variants = Object.fromEntries(
+    GPT_56_SOL_PRO_EFFORTS.map((effort) => [
+      effort,
+      {
+        ...reasoningVariant(effort, summarySupported),
+        reasoningMode: "pro",
+      },
+    ]),
+  );
+  const configured = {
+    ...openCodeModel(model),
+  } as JsonRecord;
+  configured.id = model.id;
+  configured.name = GPT_56_SOL_PRO_NAME;
+  configured.options = {
+    reasoningEffort: GPT_56_SOL_PRO_DEFAULT_EFFORT,
+    reasoningMode: "pro",
+  };
+  configured.variants = variants;
+  return configured;
 }
 
 export function openAIModelCapabilities(model: ValModel) {
@@ -647,15 +688,22 @@ export async function configureOpenCode(
   const existingVal = recordOrEmpty(provider[PROVIDER_ID]);
   const existingOptions = recordOrEmpty(existingVal.options);
   const existingModels = recordOrEmpty(existingVal.models);
-  const generatedModels = Object.fromEntries(
-    modelsToConfigure.map((model) => [
-      model.id,
-      {
-        ...recordOrEmpty(existingModels[model.id]),
-        ...openCodeModel(model),
-      },
-    ]),
-  );
+  const generatedModels: Record<string, JsonRecord> = {};
+  for (const model of modelsToConfigure) {
+    generatedModels[model.id] = {
+      ...recordOrEmpty(existingModels[model.id]),
+      ...openCodeModel(model),
+    };
+    const solProModel = openCodeSolProModel(model);
+    if (solProModel) {
+      const solProId = `${model.id}-pro`;
+      generatedModels[solProId] = {
+        ...recordOrEmpty(existingModels[solProId]),
+        ...solProModel,
+      };
+    }
+  }
+  const modelsConfigured = Object.keys(generatedModels).length;
   const nextProvider = {
     ...existingVal,
     npm: "@ai-sdk/openai",
@@ -694,7 +742,7 @@ export async function configureOpenCode(
     return {
       providerId: PROVIDER_ID,
       configPath,
-      modelsConfigured: modelsToConfigure.length,
+      modelsConfigured,
       updated: false,
     };
   }
@@ -716,7 +764,7 @@ export async function configureOpenCode(
     providerId: PROVIDER_ID,
     configPath,
     ...(backupPath ? { backupPath } : {}),
-    modelsConfigured: modelsToConfigure.length,
+    modelsConfigured,
     updated: true,
   };
 }

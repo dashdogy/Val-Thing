@@ -12,8 +12,14 @@ history.
 - [ ] Open signed-in Val once.
 - [ ] The popup shows **Connected**, **Signed in**, and **Ready**.
 - [ ] Stop the companion, press **Launch companion**, approve the browser's external-app prompt if shown, and confirm the installed launcher opens.
+- [ ] On Windows, the launcher opens `http://127.0.0.1:<port>/pairing`, the
+      page shows only the current six-digit code, and cross-origin or
+      non-loopback requests cannot read it.
 - [ ] On macOS, the launch opens Terminal and runs the companion without adding an extension error; repeating the installer repairs an existing URL handler.
 - [ ] The launcher checks for a GitHub release update before the companion starts; an offline update failure still starts the installed version.
+- [ ] After an update reloads the extension and companion, OpenCode is
+      reconfigured automatically once Val is ready; a temporary failure remains
+      pending and retries without another button click.
 - [ ] Once connected, the popup changes the launch button to **Companion running**.
 - [ ] The client API key is masked by default; **Show** reveals it and **Copy** matches the companion configuration.
 - [ ] **Rotate** invalidates the old API key, displays the new one only after
@@ -25,9 +31,24 @@ history.
 - [ ] GPT-5.6 models without explicit Val effort metadata include `none`, `low`,
       `medium`, `high`, `xhigh`, and `max`; explicit Val restrictions win.
 - [ ] Every configured `max` variant includes `reasoningEffort: "max"`, `reasoningSummary: "auto"`, and `include: ["reasoning.encrypted_content"]`.
-- [ ] `pro-*` variants appear only when Val model metadata exposes
-      `reasoning.mode: "pro"`, and OpenCode sends `reasoning.mode`, explicit
-      prompt-cache options, text verbosity, and encrypted reasoning state.
+- [ ] The standard Sol, Terra, and Luna entries each expose
+      `priority-none`, `priority-low`, `priority-medium`, `priority-high`,
+      `priority-xhigh`, and `priority-max`; every Priority variant keeps
+      standard reasoning and sets `serviceTier: "priority"`.
+- [ ] Selecting a Priority variant makes OpenCode send the official
+      `gpt-5.6-{sol,terra,luna}` API ID plus `service_tier: "priority"`; the
+      bridge maps the model back to Val's `openai-gpt-5.6-*` catalog ID without
+      dropping the requested tier.
+- [ ] The standard GPT-5.6 models have no `pro-*` effort variants.
+- [ ] When GPT-5.6 Sol is available with reasoning enabled, OpenCode exposes one
+      additional **OpenAI GPT-5.6 Sol Pro** model whose configured `id` remains
+      Val's real Sol model ID and whose default options are
+      `reasoningEffort: "medium"` and `reasoningMode: "pro"`.
+- [ ] GPT-5.6 Sol Pro exposes exactly `medium`, `high`, `xhigh`, and `max`
+      reasoning variants; every variant keeps `reasoningMode: "pro"` and none
+      enables Priority tier.
+- [ ] Selecting GPT-5.6 Sol Pro sends the real Sol model ID plus
+      `reasoning.mode: "pro"` through the Responses API.
 - [ ] `GET /healthz` returns `status: "ok"` without identity values.
 - [ ] Authenticated `GET /v1/models` returns Val's current model list.
 

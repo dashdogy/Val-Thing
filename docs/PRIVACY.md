@@ -26,6 +26,12 @@ The extension communicates only with:
 
 When the user presses **Launch companion**, the extension opens the fixed `val-openai-bridge://launch` operating-system protocol URL. The URL contains no user data, credentials, prompts, model names, or identifiers. The per-user handler installed with the companion starts the local launcher.
 
+On Windows, a protocol launch also opens a non-cacheable pairing page at the
+literal IPv4 loopback address. The page contains only the current short-lived
+pairing code and status, rejects requests from non-loopback clients,
+cross-origin reads, and non-loopback host names, and never contains the API
+key, bridge secret, RMIT token, prompts, or responses.
+
 The companion initially listens on all IPv4 interfaces (`0.0.0.0`). The popup
 can switch it between **Trusted LAN** and **This device only**, and the chosen
 mode is retained for later launches. An optional exact-IP allowlist can further
@@ -47,6 +53,14 @@ by Val.
 
 The installed launcher checks the project's GitHub Releases metadata whenever it starts the companion and may download a newer checksum-verified release. This update request does not include the RMIT token, bridge secrets, API key, prompts, responses, or Val identity data. If the check fails, the installed version starts instead.
 
+After a bridge update, the extension automatically asks the authenticated
+companion to refresh the local OpenCode provider once Val model metadata is
+ready. This writes the same local endpoint, client API key, and model
+capabilities as the manual **Configure OpenCode** button. A pending target
+version, retry count, and bounded local error message may be retained until the
+refresh succeeds; no prompts, responses, RMIT credentials, or model payloads
+are stored in that retry state.
+
 ## Storage and retention
 
 - The Val session token is stored only in memory-backed `chrome.storage.session`. It is removed when the user signs out and is cleared when the extension is disabled, reloaded, updated, or the browser restarts.
@@ -56,8 +70,8 @@ The installed launcher checks the project's GitHub Releases metadata whenever it
   survive restarts. These statistics contain no prompt or response bodies,
   identities, credentials, or model identifiers.
 - `chrome.storage.local` stores the companion URL, locally generated bridge
-  secret, and sanitized extension-update status such as version numbers and
-  check time.
+  secret, sanitized extension-update status such as version numbers and check
+  time, and any pending automatic OpenCode refresh state.
 - The companion sends the client API key only after the extension authenticates. The extension holds it in service-worker and popup memory for the masked reveal/copy control and does not persist it.
 - The companion stores its client API key, bridge secret, paired extension ID,
   selected network mode, usage totals, and at most 1,000

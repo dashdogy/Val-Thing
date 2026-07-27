@@ -60,6 +60,38 @@ test("validates and translates Chat Completions fields without dropping compatib
   assert.equal((relay.responseFormat as { type?: string }).type, "json_schema");
 });
 
+test("maps official GPT-5.6 API IDs to Val's catalog IDs", () => {
+  for (const tier of ["sol", "terra", "luna"]) {
+    const model = `gpt-5.6-${tier}`;
+    const valModel = `openai-${model}`;
+    const chatRelay = chatRequestToRelay(
+      parseChatCompletion({
+        model,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+      { mode: "temporary" },
+    );
+    const responsesRelay = responseRequestToRelay(
+      parseResponse({
+        model,
+        input: "hello",
+      }),
+      { mode: "temporary" },
+    );
+    assert.equal(chatRelay.model, valModel);
+    assert.equal(responsesRelay.model, valModel);
+  }
+
+  const unchanged = responseRequestToRelay(
+    parseResponse({
+      model: "val-model",
+      input: "hello",
+    }),
+    { mode: "temporary" },
+  );
+  assert.equal(unchanged.model, "val-model");
+});
+
 test("returns OpenAI-shaped validation errors for unsupported modalities and content", () => {
   assert.throws(
     () =>

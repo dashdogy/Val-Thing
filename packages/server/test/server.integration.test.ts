@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1547,7 +1548,7 @@ test("authenticated extension control configures OpenCode without returning secr
   assert.deepEqual(result, {
     configured: true,
     provider_id: "val",
-    models_configured: 1,
+    models_configured: 2,
     updated: true,
     backup_created: false,
   });
@@ -1558,7 +1559,7 @@ test("authenticated extension control configures OpenCode without returning secr
     provider: {
       val: {
         options: { baseURL: string; apiKey: string };
-        models: Record<string, unknown>;
+        models: Record<string, Record<string, unknown>>;
       };
     };
   };
@@ -1572,7 +1573,86 @@ test("authenticated extension control configures OpenCode without returning secr
   );
   assert.deepEqual(Object.keys(openCodeConfig.provider.val.models), [
     "openai-gpt-5.6-sol",
+    "openai-gpt-5.6-sol-pro",
   ]);
+  const standardVariants = openCodeConfig.provider.val.models[
+    "openai-gpt-5.6-sol"
+  ]?.variants as Record<string, Record<string, unknown>>;
+  assert.equal(
+    openCodeConfig.provider.val.models["openai-gpt-5.6-sol"]?.id,
+    "gpt-5.6-sol",
+  );
+  assert.deepEqual(
+    Object.keys(standardVariants).filter((variant) =>
+      variant.startsWith("priority-"),
+    ),
+    [
+      "priority-none",
+      "priority-low",
+      "priority-medium",
+      "priority-high",
+      "priority-xhigh",
+      "priority-max",
+    ],
+  );
+  assert.deepEqual(standardVariants["priority-max"], {
+    reasoningEffort: "max",
+    reasoningSummary: "auto",
+    include: ["reasoning.encrypted_content"],
+    reasoningContext: "all_turns",
+    serviceTier: "priority",
+  });
+  assert.deepEqual(
+    openCodeConfig.provider.val.models["openai-gpt-5.6-sol-pro"],
+    {
+      id: "openai-gpt-5.6-sol",
+      name: "OpenAI GPT-5.6 Sol Pro",
+      family: "gpt-5.6",
+      limit: {
+        context: 1_050_000,
+        output: 128_000,
+      },
+      reasoning: true,
+      temperature: true,
+      tool_call: true,
+      attachment: true,
+      modalities: {
+        input: ["text", "image"],
+        output: ["text"],
+      },
+      options: {
+        reasoningEffort: "medium",
+        reasoningMode: "pro",
+      },
+      variants: {
+        medium: {
+          reasoningEffort: "medium",
+          reasoningSummary: "auto",
+          reasoningContext: "all_turns",
+          reasoningMode: "pro",
+        },
+        high: {
+          reasoningEffort: "high",
+          reasoningSummary: "auto",
+          reasoningContext: "all_turns",
+          reasoningMode: "pro",
+        },
+        xhigh: {
+          reasoningEffort: "xhigh",
+          reasoningSummary: "auto",
+          reasoningContext: "all_turns",
+          reasoningMode: "pro",
+        },
+        max: {
+          reasoningEffort: "max",
+          reasoningSummary: "auto",
+          include: ["reasoning.encrypted_content"],
+          reasoningContext: "all_turns",
+          reasoningMode: "pro",
+        },
+      },
+    },
+  );
 });
 
 test("extension security controls rotate keys, reset usage, and persist network scope", async (t) => {
@@ -2266,6 +2346,19 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   });
   assert.equal(storedResponse.status, "completed");
   assert.equal(storedResponse.output[0]?.type, "message");
+
+  const priorityAliasResponse = await client.responses.create({
+    model: "gpt-5.6-luna",
+    input: "PRIORITY_ALIAS",
+    service_tier: "priority",
+  });
+  assert.equal(priorityAliasResponse.status, "completed");
+  const priorityAliasRequest = extension.responsesRequests.find((request) =>
+    JSON.stringify(request.body).includes("PRIORITY_ALIAS"),
+  );
+  assert.equal(priorityAliasRequest?.model, "openai-gpt-5.6-luna");
+  assert.equal(priorityAliasRequest?.body.model, "openai-gpt-5.6-luna");
+  assert.equal(priorityAliasRequest?.body.service_tier, "priority");
 
   const continuedResponse = await client.responses.create({
     model: "val-test",
@@ -2964,6 +3057,77 @@ test("pairing rejects a claimed extension ID that does not match Origin", async 
     ((await missingOrigin.json()) as { error: { code: string } }).error.code,
     "invalid_pairing_request",
   );
+});
+
+test("pairing page reveals only the short-lived code on loopback", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-pair-page-"),
+  );
+  const server = await ValBridgeServer.create({
+    config: { port: 0, configDirectory },
+    quiet: true,
+  });
+  await server.listen();
+  t.after(async () => {
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  const page = await fetch(`${server.baseUrl}/pairing`);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type") ?? "", /^text\/html/);
+  assert.equal(page.headers.get("cache-control"), "no-store");
+  assert.equal(page.headers.get("x-frame-options"), "DENY");
+  assert.match(
+    page.headers.get("content-security-policy") ?? "",
+    /frame-ancestors 'none'/,
+  );
+  const pageHtml = await page.text();
+  assert.match(pageHtml, /Val Bridge pairing/);
+  assert.ok(pageHtml.includes(server.pairingCode));
+  const secrets = server.secrets.get();
+  assert.equal(pageHtml.includes(secrets.clientApiKey), false);
+  assert.equal(pageHtml.includes(secrets.bridgeSecret), false);
+
+  const crossOrigin = await fetch(`${server.baseUrl}/pairing`, {
+    headers: { origin: "https://example.com" },
+  });
+  assert.equal(crossOrigin.status, 403);
+  assert.equal((await crossOrigin.text()).includes(server.pairingCode), false);
+
+  const reboundHost = await new Promise<{ status: number; body: string }>(
+    (resolvePromise, rejectPromise) => {
+      const request = httpRequest(
+        `${server.baseUrl}/pairing`,
+        { headers: { host: "example.com" } },
+        (response) => {
+          response.setEncoding("utf8");
+          let body = "";
+          response.on("data", (chunk) => {
+            body += chunk;
+          });
+          response.on("end", () => {
+            resolvePromise({
+              status: response.statusCode ?? 0,
+              body,
+            });
+          });
+        },
+      );
+      request.once("error", rejectPromise);
+      request.end();
+    },
+  );
+  assert.equal(reboundHost.status, 403);
+  assert.equal(reboundHost.body.includes(server.pairingCode), false);
+
+  const paired = await pairingFetch(server, server.pairingCode);
+  assert.equal(paired.status, 200);
+  await paired.json();
+  const completedPage = await fetch(`${server.baseUrl}/pairing`);
+  const completedHtml = await completedPage.text();
+  assert.match(completedHtml, /Pairing completed/);
+  assert.equal(completedHtml.includes(server.pairingCode), false);
 });
 
 test("pairing codes are single-use", async (t) => {
