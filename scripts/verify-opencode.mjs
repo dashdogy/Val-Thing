@@ -474,11 +474,47 @@ const config = {
       },
       models: {
         "tool-model": {
+          id: "gpt-5.6-sol",
           name: "Tool acceptance model",
           reasoning: true,
           tool_call: true,
           variants: {
-            "pro-max": {
+            "priority-max": {
+              reasoningEffort: "max",
+              reasoningSummary: "auto",
+              include: ["reasoning.encrypted_content"],
+              reasoningContext: "all_turns",
+              serviceTier: "priority",
+            },
+          },
+          modalities: {
+            input: ["text"],
+            output: ["text"],
+          },
+        },
+        "tool-model-pro": {
+          id: "tool-model",
+          name: "Tool acceptance model Pro",
+          reasoning: true,
+          tool_call: true,
+          options: {
+            reasoningEffort: "medium",
+            reasoningMode: "pro",
+          },
+          variants: {
+            medium: {
+              reasoningEffort: "medium",
+              reasoningMode: "pro",
+            },
+            high: {
+              reasoningEffort: "high",
+              reasoningMode: "pro",
+            },
+            xhigh: {
+              reasoningEffort: "xhigh",
+              reasoningMode: "pro",
+            },
+            max: {
               reasoningEffort: "max",
               reasoningMode: "pro",
               reasoningSummary: "detailed",
@@ -501,9 +537,23 @@ const config = {
   },
 };
 
-let run;
+const runOptions = {
+  cwd: workspace,
+  env: {
+    ...process.env,
+    NO_COLOR: "1",
+    OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+    OPENCODE_DISABLE_AUTOUPDATE: "true",
+    XDG_CACHE_HOME: join(temporaryRoot, "cache"),
+    XDG_CONFIG_HOME: join(temporaryRoot, "config"),
+    XDG_DATA_HOME: join(temporaryRoot, "data"),
+    XDG_STATE_HOME: join(temporaryRoot, "state"),
+  },
+};
+let priorityRun;
+let proRun;
 try {
-  run = await runProcess(
+  priorityRun = await runProcess(
     openCodeBinary,
     [
       "run",
@@ -515,33 +565,45 @@ try {
       "--model",
       "val-acceptance/tool-model",
       "--variant",
-      "pro-max",
+      "priority-max",
       "--dir",
       workspace,
       "Use the read tool to read probe.txt, then report completion.",
     ],
-    {
-      cwd: workspace,
-      env: {
-        ...process.env,
-        NO_COLOR: "1",
-        OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
-        OPENCODE_DISABLE_AUTOUPDATE: "true",
-        XDG_CACHE_HOME: join(temporaryRoot, "cache"),
-        XDG_CONFIG_HOME: join(temporaryRoot, "config"),
-        XDG_DATA_HOME: join(temporaryRoot, "data"),
-        XDG_STATE_HOME: join(temporaryRoot, "state"),
-      },
-    },
+    runOptions,
+  );
+  proRun = await runProcess(
+    openCodeBinary,
+    [
+      "run",
+      "--pure",
+      "--format",
+      "json",
+      "--thinking",
+      "--auto",
+      "--model",
+      "val-acceptance/tool-model-pro",
+      "--variant",
+      "max",
+      "--dir",
+      workspace,
+      "Use the read tool to read probe.txt, then report completion.",
+    ],
+    runOptions,
   );
 } finally {
   await new Promise((resolveClose) => mock.close(resolveClose));
 }
 
 try {
-  if (run.code !== 0) {
+  if (priorityRun.code !== 0) {
     throw new Error(
-      `OpenCode exited with ${run.code ?? run.signal}.\n${run.stderr || run.stdout}`,
+      `OpenCode Priority acceptance exited with ${priorityRun.code ?? priorityRun.signal}.\n${priorityRun.stderr || priorityRun.stdout}`,
+    );
+  }
+  if (proRun.code !== 0) {
+    throw new Error(
+      `OpenCode Pro acceptance exited with ${proRun.code ?? proRun.signal}.\n${proRun.stderr || proRun.stdout}`,
     );
   }
   const relayRequests = requests.filter((request) => {
@@ -551,19 +613,73 @@ try {
       JSON.stringify(request).includes("function_call_output")
     );
   });
-  if (relayRequests.length < 2) {
+  if (relayRequests.length < 4) {
     throw new Error(
-      `Expected a tool round-trip, but OpenCode made ${relayRequests.length} relevant Responses request(s).`,
+      `Expected Priority and Pro tool round-trips, but OpenCode made ${relayRequests.length} relevant Responses request(s).`,
     );
   }
   const requestSummary = relayRequests.map((request) => ({
+    model: request?.model,
     reasoning: request?.reasoning,
+    serviceTier: request?.service_tier,
     tools: Array.isArray(request?.tools)
       ? request.tools.map((tool) => tool?.name)
       : [],
     hasToolOutput: JSON.stringify(request).includes("function_call_output"),
   }));
-  for (const [index, request] of relayRequests.entries()) {
+  const priorityRequests = relayRequests.filter(
+    (request) => request?.service_tier === "priority",
+  );
+  if (priorityRequests.length < 2) {
+    throw new Error(
+      `OpenCode did not preserve service_tier=priority through a tool round-trip: ${JSON.stringify(requestSummary)}.`,
+    );
+  }
+  for (const [index, request] of priorityRequests.entries()) {
+    if (request?.model !== "gpt-5.6-sol") {
+      throw new Error(
+        `OpenCode Priority request ${index + 1} changed the upstream model ID: ${JSON.stringify(requestSummary)}.`,
+      );
+    }
+    if (
+      request?.reasoning?.effort !== "max" ||
+      request?.reasoning?.summary !== "auto" ||
+      request?.reasoning?.mode !== undefined
+    ) {
+      throw new Error(
+        `OpenCode Priority request ${index + 1} did not preserve standard max reasoning: ${JSON.stringify(requestSummary)}.`,
+      );
+    }
+    if (request?.reasoning?.context !== "all_turns") {
+      throw new Error(
+        `OpenCode Priority request ${index + 1} did not preserve reasoning.context=all_turns: ${JSON.stringify(requestSummary)}.`,
+      );
+    }
+    if (!request?.include?.includes("reasoning.encrypted_content")) {
+      throw new Error(
+        `OpenCode Priority request ${index + 1} did not request encrypted reasoning content.`,
+      );
+    }
+  }
+  const proRequests = relayRequests.filter(
+    (request) => request?.reasoning?.mode === "pro",
+  );
+  if (proRequests.length < 2) {
+    throw new Error(
+      `OpenCode did not preserve Pro mode through a tool round-trip: ${JSON.stringify(requestSummary)}.`,
+    );
+  }
+  for (const [index, request] of proRequests.entries()) {
+    if (request?.model !== "tool-model") {
+      throw new Error(
+        `OpenCode request ${index + 1} did not resolve the Pro alias to its real model ID: ${JSON.stringify(requestSummary)}.`,
+      );
+    }
+    if (request?.service_tier === "priority") {
+      throw new Error(
+        `OpenCode Pro request ${index + 1} incorrectly enabled Priority tier.`,
+      );
+    }
     if (
       request?.reasoning?.effort !== "max" ||
       request?.reasoning?.mode !== "pro" ||
@@ -597,7 +713,16 @@ try {
       );
     }
   }
-  const continuation = JSON.stringify(relayRequests.slice(1));
+  const priorityContinuation = JSON.stringify(priorityRequests.slice(1));
+  if (
+    !priorityContinuation.includes("function_call_output") ||
+    !priorityContinuation.includes(TOOL_FILE_CONTENT)
+  ) {
+    throw new Error(
+      "OpenCode did not return the read tool output on the Priority continuation.",
+    );
+  }
+  const continuation = JSON.stringify(proRequests.slice(1));
   if (
     !continuation.includes("function_call_output") ||
     !continuation.includes(TOOL_FILE_CONTENT)
@@ -611,18 +736,24 @@ try {
       "OpenCode did not return encrypted reasoning state during the tool continuation.",
     );
   }
-  if (!run.stdout.includes(FINAL_MARKER)) {
+  if (
+    !priorityRun.stdout.includes(FINAL_MARKER) ||
+    !proRun.stdout.includes(FINAL_MARKER)
+  ) {
     throw new Error("OpenCode did not render the final model response.");
   }
-  if (!run.stdout.includes(REASONING_MARKER)) {
+  if (
+    !priorityRun.stdout.includes(REASONING_MARKER) ||
+    !proRun.stdout.includes(REASONING_MARKER)
+  ) {
     throw new Error("OpenCode did not expose the genuine reasoning summary.");
   }
   console.log(
-    `OpenCode ${run.stdout.includes(REASONING_MARKER) ? "accepted" : "rejected"} the bridge contract.`,
+    `OpenCode ${priorityRun.stdout.includes(REASONING_MARKER) && proRun.stdout.includes(REASONING_MARKER) ? "accepted" : "rejected"} the bridge contract.`,
   );
   console.log(`Binary: ${openCodeBinary}`);
   console.log(
-    "Verified: Responses API, pro reasoning, explicit cache options, verbosity, read tool round-trip, reasoning summary, encrypted reasoning continuation.",
+    "Verified: Priority service tier, dedicated Pro model alias, real upstream model ID, Responses API, reasoning options, explicit cache options, verbosity, tool round-trips, reasoning summaries, encrypted reasoning continuation.",
   );
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });

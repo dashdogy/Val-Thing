@@ -9,6 +9,7 @@ import type {
 } from "@val-bridge/protocol";
 import { z } from "zod";
 import { OpenAIHttpError } from "./errors.js";
+import { valModelIdForOpenAI } from "./model-ids.js";
 
 const contentPartSchema = z
   .object({
@@ -226,7 +227,7 @@ export function chatRequestToRelay(
 ): RelayCompletionRequest {
   return {
     kind: "completion",
-    model: body.model,
+    model: valModelIdForOpenAI(body.model),
     messages: body.messages as OpenAIMessage[],
     parameters: selectParameters(body),
     ...(body.tools ? { tools: body.tools as OpenAITool[] } : {}),
@@ -436,7 +437,7 @@ export function responseRequestToRelay(
   const tools = responseToolsToChatTools(body.tools);
   return {
     kind: "completion",
-    model: body.model,
+    model: valModelIdForOpenAI(body.model),
     messages: responseInputToMessages(body),
     parameters,
     ...(tools ? { tools } : {}),

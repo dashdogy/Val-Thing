@@ -4,12 +4,20 @@ All notable changes to Val OpenAI Local Bridge are documented here.
 
 ## Unreleased
 
+## 0.1.13 - 2026-07-27
+
 - Made Windows protocol launches open a loopback-only, non-cacheable pairing
   page so the short-lived code remains visible even when the companion has no
   console window.
 - Made each bridge update refresh the OpenCode provider automatically after
   the updated extension, companion, Val session, and model metadata are ready,
   with persisted retry state across reloads.
+- Exposed GPT-5.6 Sol Pro in OpenCode as one dedicated model choice backed by
+  Val's real Sol model ID, with medium as the default and medium, high, xhigh,
+  and max Pro reasoning variants instead of Pro variants on standard Sol.
+- Added `priority-none` through `priority-max` variants to the standard Sol,
+  Terra, and Luna OpenCode entries, using their official API IDs so OpenCode
+  forwards `service_tier: "priority"` before the bridge maps them to Val IDs.
 
 ## 0.1.12 - 2026-07-27
 

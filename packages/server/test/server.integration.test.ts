@@ -1548,7 +1548,7 @@ test("authenticated extension control configures OpenCode without returning secr
   assert.deepEqual(result, {
     configured: true,
     provider_id: "val",
-    models_configured: 1,
+    models_configured: 2,
     updated: true,
     backup_created: false,
   });
@@ -1559,7 +1559,7 @@ test("authenticated extension control configures OpenCode without returning secr
     provider: {
       val: {
         options: { baseURL: string; apiKey: string };
-        models: Record<string, unknown>;
+        models: Record<string, Record<string, unknown>>;
       };
     };
   };
@@ -1573,7 +1573,86 @@ test("authenticated extension control configures OpenCode without returning secr
   );
   assert.deepEqual(Object.keys(openCodeConfig.provider.val.models), [
     "openai-gpt-5.6-sol",
+    "openai-gpt-5.6-sol-pro",
   ]);
+  const standardVariants = openCodeConfig.provider.val.models[
+    "openai-gpt-5.6-sol"
+  ]?.variants as Record<string, Record<string, unknown>>;
+  assert.equal(
+    openCodeConfig.provider.val.models["openai-gpt-5.6-sol"]?.id,
+    "gpt-5.6-sol",
+  );
+  assert.deepEqual(
+    Object.keys(standardVariants).filter((variant) =>
+      variant.startsWith("priority-"),
+    ),
+    [
+      "priority-none",
+      "priority-low",
+      "priority-medium",
+      "priority-high",
+      "priority-xhigh",
+      "priority-max",
+    ],
+  );
+  assert.deepEqual(standardVariants["priority-max"], {
+    reasoningEffort: "max",
+    reasoningSummary: "auto",
+    include: ["reasoning.encrypted_content"],
+    reasoningContext: "all_turns",
+    serviceTier: "priority",
+  });
+  assert.deepEqual(
+    openCodeConfig.provider.val.models["openai-gpt-5.6-sol-pro"],
+    {
+      id: "openai-gpt-5.6-sol",
+      name: "OpenAI GPT-5.6 Sol Pro",
+      family: "gpt-5.6",
+      limit: {
+        context: 1_050_000,
+        output: 128_000,
+      },
+      reasoning: true,
+      temperature: true,
+      tool_call: true,
+      attachment: true,
+      modalities: {
+        input: ["text", "image"],
+        output: ["text"],
+      },
+      options: {
+        reasoningEffort: "medium",
+        reasoningMode: "pro",
+      },
+      variants: {
+        medium: {
+          reasoningEffort: "medium",
+          reasoningSummary: "auto",
+          reasoningContext: "all_turns",
+          reasoningMode: "pro",
+        },
+        high: {
+          reasoningEffort: "high",
+          reasoningSummary: "auto",
+          reasoningContext: "all_turns",
+          reasoningMode: "pro",
+        },
+        xhigh: {
+          reasoningEffort: "xhigh",
+          reasoningSummary: "auto",
+          reasoningContext: "all_turns",
+          reasoningMode: "pro",
+        },
+        max: {
+          reasoningEffort: "max",
+          reasoningSummary: "auto",
+          include: ["reasoning.encrypted_content"],
+          reasoningContext: "all_turns",
+          reasoningMode: "pro",
+        },
+      },
+    },
+  );
 });
 
 test("extension security controls rotate keys, reset usage, and persist network scope", async (t) => {
@@ -2267,6 +2346,19 @@ test("companion contract works through the official OpenAI JavaScript SDK", asyn
   });
   assert.equal(storedResponse.status, "completed");
   assert.equal(storedResponse.output[0]?.type, "message");
+
+  const priorityAliasResponse = await client.responses.create({
+    model: "gpt-5.6-luna",
+    input: "PRIORITY_ALIAS",
+    service_tier: "priority",
+  });
+  assert.equal(priorityAliasResponse.status, "completed");
+  const priorityAliasRequest = extension.responsesRequests.find((request) =>
+    JSON.stringify(request.body).includes("PRIORITY_ALIAS"),
+  );
+  assert.equal(priorityAliasRequest?.model, "openai-gpt-5.6-luna");
+  assert.equal(priorityAliasRequest?.body.model, "openai-gpt-5.6-luna");
+  assert.equal(priorityAliasRequest?.body.service_tier, "priority");
 
   const continuedResponse = await client.responses.create({
     model: "val-test",

@@ -31,6 +31,7 @@ import {
   openAIErrorBody,
 } from "./errors.js";
 import { MappingStore } from "./mapping-store.js";
+import { valModelIdForOpenAI } from "./model-ids.js";
 import {
   hostForNetworkScope,
   NetworkSettingsStore,
@@ -1574,6 +1575,8 @@ export class ValBridgeServer {
 
       bridgeResponseId = `resp_${randomUUID().replaceAll("-", "")}`;
       const relayBody = { ...body } as Record<string, unknown>;
+      const valModelId = valModelIdForOpenAI(body.model);
+      relayBody.model = valModelId;
       delete relayBody.previous_response_id;
       relayBody.store = body.store || Boolean(nativePreviousResponseId);
       if (nativePreviousResponseId) {
@@ -1603,7 +1606,7 @@ export class ValBridgeServer {
 
       const relayRequest = {
         kind: "responses" as const,
-        model: body.model,
+        model: valModelId,
         body: relayBody as import("@val-bridge/protocol").JsonObject,
         headers: requestHeadersForRelay(request.headers),
       };

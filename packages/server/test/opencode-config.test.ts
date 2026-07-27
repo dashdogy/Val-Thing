@@ -79,6 +79,7 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
   const models = val?.models as Record<string, Record<string, unknown>>;
   assert.deepEqual(Object.keys(models), ["openai-gpt-5.6-luna"]);
   assert.equal(models["openai-gpt-5.6-luna"]?.customModelSetting, "keep");
+  assert.equal(models["openai-gpt-5.6-luna"]?.id, "gpt-5.6-luna");
   assert.equal(models["openai-gpt-5.6-luna"]?.reasoning, true);
   assert.deepEqual(models["openai-gpt-5.6-luna"]?.limit, {
     context: 1_050_000,
@@ -88,7 +89,21 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
     Object.keys(
       models["openai-gpt-5.6-luna"]?.variants as Record<string, unknown>,
     ),
-    ["none", "low", "medium", "high", "xhigh", "max", "max-detailed"],
+    [
+      "none",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "max-detailed",
+      "priority-none",
+      "priority-low",
+      "priority-medium",
+      "priority-high",
+      "priority-xhigh",
+      "priority-max",
+    ],
   );
   assert.deepEqual(
     (
@@ -112,6 +127,47 @@ test("merges the Val provider, preserves unrelated config, and writes a backup",
       reasoningEffort: "high",
       reasoningSummary: "auto",
       reasoningContext: "all_turns",
+    },
+  );
+  assert.deepEqual(
+    (
+      models["openai-gpt-5.6-luna"]?.variants as Record<
+        string,
+        Record<string, unknown>
+      >
+    )["priority-none"],
+    {
+      reasoningEffort: "none",
+      serviceTier: "priority",
+    },
+  );
+  assert.deepEqual(
+    (
+      models["openai-gpt-5.6-luna"]?.variants as Record<
+        string,
+        Record<string, unknown>
+      >
+    )["priority-high"],
+    {
+      reasoningEffort: "high",
+      reasoningSummary: "auto",
+      reasoningContext: "all_turns",
+      serviceTier: "priority",
+    },
+  );
+  assert.deepEqual(
+    (
+      models["openai-gpt-5.6-luna"]?.variants as Record<
+        string,
+        Record<string, unknown>
+      >
+    )["priority-max"],
+    {
+      reasoningEffort: "max",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+      reasoningContext: "all_turns",
+      serviceTier: "priority",
     },
   );
   assert.deepEqual(
@@ -161,7 +217,9 @@ test("does not rewrite or back up an already configured file", async (t) => {
   const files = await readdir(root);
 
   assert.equal(first.updated, true);
+  assert.equal(first.modelsConfigured, 2);
   assert.equal(second.updated, false);
+  assert.equal(second.modelsConfigured, 2);
   assert.equal(second.backupPath, undefined);
   assert.equal(await readFile(configPath, "utf8"), firstText);
   assert.deepEqual(files, ["opencode.jsonc"]);
@@ -292,7 +350,7 @@ test("honors explicit reasoning and summary capability restrictions", () => {
   });
 });
 
-test("exports pro variants only when Val exposes GPT-5.6 pro mode", () => {
+test("keeps Pro out of the standard model's effort variants", () => {
   const model = openCodeModel({
     id: "openai-gpt-5.6-sol",
     features: {
@@ -329,17 +387,177 @@ test("exports pro variants only when Val exposes GPT-5.6 pro mode", () => {
       modeSource: "val_metadata",
     },
   );
-  assert.deepEqual(variants["pro-none"], {
-    reasoningEffort: "none",
-    reasoningMode: "pro",
-  });
-  assert.deepEqual(variants["pro-max"], {
-    reasoningEffort: "max",
+  assert.deepEqual(Object.keys(variants), [
+    "none",
+    "high",
+    "max",
+    "priority-none",
+    "priority-low",
+    "priority-medium",
+    "priority-high",
+    "priority-xhigh",
+    "priority-max",
+  ]);
+  assert.equal(
+    Object.keys(variants).some((variant) => variant.startsWith("pro-")),
+    false,
+  );
+  assert.deepEqual(variants["priority-high"], {
+    reasoningEffort: "high",
     reasoningSummary: "auto",
-    include: ["reasoning.encrypted_content"],
     reasoningContext: "all_turns",
+    serviceTier: "priority",
+  });
+});
+
+test("adds all Priority efforts to Sol, Terra, and Luna only", () => {
+  const priorityVariants = [
+    "priority-none",
+    "priority-low",
+    "priority-medium",
+    "priority-high",
+    "priority-xhigh",
+    "priority-max",
+  ];
+  for (const id of [
+    "openai-gpt-5.6-sol",
+    "openai-gpt-5.6-terra",
+    "openai-gpt-5.6-luna",
+  ]) {
+    const configured = openCodeModel({
+      id,
+      features: {
+        chat: {
+          settings: {
+            reasoning_effort: { values: ["max"] },
+          },
+        },
+      },
+    });
+    const variants = configured.variants as Record<
+      string,
+      Record<string, unknown>
+    >;
+    assert.deepEqual(
+      Object.keys(variants).filter((variant) =>
+        variant.startsWith("priority-"),
+      ),
+      priorityVariants,
+      id,
+    );
+    for (const variant of priorityVariants) {
+      const effort = variant.slice("priority-".length);
+      assert.equal(variants[variant]?.reasoningEffort, effort, variant);
+      assert.equal(variants[variant]?.serviceTier, "priority", variant);
+      assert.equal(variants[variant]?.reasoningMode, undefined, variant);
+    }
+  }
+
+  const nonGpt56 = openCodeModel({
+    id: "openai-gpt-5.5",
+    features: {
+      chat: {
+        settings: {
+          reasoning_effort: {
+            values: ["none", "low", "medium", "high", "xhigh", "max"],
+          },
+        },
+      },
+    },
+  });
+  assert.deepEqual(
+    Object.keys(nonGpt56.variants as Record<string, unknown>).filter(
+      (variant) => variant.startsWith("priority-"),
+    ),
+    [],
+  );
+});
+
+test("adds one dedicated GPT-5.6 Sol Pro model alias", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "val-opencode-sol-pro-"));
+  const configPath = join(root, "opencode.jsonc");
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const result = await configureOpenCode({
+    baseURL,
+    clientApiKey,
+    configPath,
+    models: [
+      {
+        id: "openai-gpt-5.6-sol",
+        name: "OpenAI GPT-5.6 Sol",
+        features: {
+          chat: {
+            settings: {
+              reasoning_effort: {
+                values: ["none", "low", "medium", "high", "xhigh", "max"],
+              },
+              reasoning_mode: { values: ["standard"] },
+            },
+          },
+        },
+      },
+    ],
+  });
+
+  assert.equal(result.modelsConfigured, 2);
+  const configured = parse(await readFile(configPath, "utf8")) as {
+    provider: {
+      val: {
+        models: Record<string, Record<string, unknown>>;
+      };
+    };
+  };
+  const models = configured.provider.val.models;
+  assert.deepEqual(Object.keys(models), [
+    "openai-gpt-5.6-sol",
+    "openai-gpt-5.6-sol-pro",
+  ]);
+  assert.equal(models["openai-gpt-5.6-sol-pro"]?.id, "openai-gpt-5.6-sol");
+  assert.equal(models["openai-gpt-5.6-sol"]?.id, "gpt-5.6-sol");
+  assert.equal(
+    models["openai-gpt-5.6-sol-pro"]?.name,
+    "OpenAI GPT-5.6 Sol Pro",
+  );
+  assert.deepEqual(models["openai-gpt-5.6-sol-pro"]?.options, {
+    reasoningEffort: "medium",
     reasoningMode: "pro",
   });
+  assert.deepEqual(models["openai-gpt-5.6-sol-pro"]?.variants, {
+    medium: {
+      reasoningEffort: "medium",
+      reasoningSummary: "auto",
+      reasoningContext: "all_turns",
+      reasoningMode: "pro",
+    },
+    high: {
+      reasoningEffort: "high",
+      reasoningSummary: "auto",
+      reasoningContext: "all_turns",
+      reasoningMode: "pro",
+    },
+    xhigh: {
+      reasoningEffort: "xhigh",
+      reasoningSummary: "auto",
+      reasoningContext: "all_turns",
+      reasoningMode: "pro",
+    },
+    max: {
+      reasoningEffort: "max",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+      reasoningContext: "all_turns",
+      reasoningMode: "pro",
+    },
+  });
+  const standardVariants = models["openai-gpt-5.6-sol"]?.variants as Record<
+    string,
+    unknown
+  >;
+  assert.equal(
+    Object.keys(standardVariants).some((variant) => variant.startsWith("pro-")),
+    false,
+  );
 });
 
 test("advertises context and reasoning evidence without exposing raw model data", () => {
