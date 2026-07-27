@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { dirname } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   assertSupportedNode,
   installOptionsFromCli,
@@ -10,6 +11,7 @@ import {
   readInstalledState,
   repairCompanionLaunchProtocol,
 } from "./install-core.js";
+import { pairingPageLaunchCommand } from "./pairing-page.js";
 import { defaultInstallRoot } from "./paths.js";
 
 const help = `Val Bridge launcher
@@ -36,6 +38,39 @@ async function companionIsRunning(port: number) {
   }
 }
 
+async function revealPairingPage(port: number) {
+  const command = pairingPageLaunchCommand(process.platform, port);
+  if (!command) return;
+  const deadline = Date.now() + 15_000;
+  while (!(await companionIsRunning(port))) {
+    if (Date.now() >= deadline) {
+      console.warn(
+        "Pairing page unavailable because the companion did not start.",
+      );
+      return;
+    }
+    await delay(200);
+  }
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const browser = spawn(command.file, command.arguments, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+    });
+    browser.once("error", rejectPromise);
+    browser.once("spawn", () => {
+      browser.unref();
+      resolvePromise();
+    });
+  }).catch((error: unknown) => {
+    console.warn(
+      `Could not open the local pairing page: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  });
+}
+
 async function main() {
   assertSupportedNode();
   const options = parseCliOptions(process.argv.slice(2));
@@ -51,6 +86,7 @@ async function main() {
   const port = companionPort();
   if (await companionIsRunning(port)) {
     console.log(`Val Bridge is already running at http://127.0.0.1:${port}/v1`);
+    if (options.launchUrl) await revealPairingPage(port);
     return;
   }
 
@@ -78,6 +114,13 @@ async function main() {
     stdio: "inherit",
     windowsHide: false,
   });
+  const resultPromise = new Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+  }>((resolvePromise, rejectPromise) => {
+    child.once("error", rejectPromise);
+    child.once("exit", (code, signal) => resolvePromise({ code, signal }));
+  });
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     const handler = () => {
@@ -86,13 +129,8 @@ async function main() {
     signalHandlers.set(signal, handler);
     process.once(signal, handler);
   }
-  const result = await new Promise<{
-    code: number | null;
-    signal: NodeJS.Signals | null;
-  }>((resolvePromise, rejectPromise) => {
-    child.once("error", rejectPromise);
-    child.once("exit", (code, signal) => resolvePromise({ code, signal }));
-  });
+  if (options.launchUrl) await revealPairingPage(port);
+  const result = await resultPromise;
   for (const [signal, handler] of signalHandlers) {
     process.off(signal, handler);
   }

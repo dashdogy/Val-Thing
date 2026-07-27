@@ -26,6 +26,12 @@ The extension communicates only with:
 
 When the user presses **Launch companion**, the extension opens the fixed `val-openai-bridge://launch` operating-system protocol URL. The URL contains no user data, credentials, prompts, model names, or identifiers. The per-user handler installed with the companion starts the local launcher.
 
+On Windows, a protocol launch also opens a non-cacheable pairing page at the
+literal IPv4 loopback address. The page contains only the current short-lived
+pairing code and status, rejects requests from non-loopback clients,
+cross-origin reads, and non-loopback host names, and never contains the API
+key, bridge secret, RMIT token, prompts, or responses.
+
 The companion initially listens on all IPv4 interfaces (`0.0.0.0`). The popup
 can switch it between **Trusted LAN** and **This device only**, and the chosen
 mode is retained for later launches. An optional exact-IP allowlist can further

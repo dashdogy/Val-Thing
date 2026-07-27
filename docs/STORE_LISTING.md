@@ -83,7 +83,8 @@ The reviewer needs:
 1. Node.js 24 or newer;
 2. the companion source or release bundle and its startup command;
 3. access to an authorized RMIT Val test account;
-4. the five-minute console pairing code; and
+4. the five-minute pairing code shown in the companion console or local
+   Windows pairing page; and
 5. a benign Chat Completions test request.
 
 If an authorized reviewer account cannot be provided, use a private or otherwise appropriately restricted distribution channel rather than submitting an untestable public listing.

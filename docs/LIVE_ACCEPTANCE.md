@@ -12,6 +12,9 @@ history.
 - [ ] Open signed-in Val once.
 - [ ] The popup shows **Connected**, **Signed in**, and **Ready**.
 - [ ] Stop the companion, press **Launch companion**, approve the browser's external-app prompt if shown, and confirm the installed launcher opens.
+- [ ] On Windows, the launcher opens `http://127.0.0.1:<port>/pairing`, the
+      page shows only the current six-digit code, and cross-origin or
+      non-loopback requests cannot read it.
 - [ ] On macOS, the launch opens Terminal and runs the companion without adding an extension error; repeating the installer repairs an existing URL handler.
 - [ ] The launcher checks for a GitHub release update before the companion starts; an offline update failure still starts the installed version.
 - [ ] Once connected, the popup changes the launch button to **Companion running**.

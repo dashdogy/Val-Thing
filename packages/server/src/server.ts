@@ -179,17 +179,20 @@ export function normalizeRemoteAddress(address: string) {
   return address.startsWith("::ffff:") ? address.slice(7) : address;
 }
 
+export function isLoopbackAddress(address: string) {
+  const normalized = normalizeRemoteAddress(address);
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized === "0:0:0:0:0:0:0:1"
+  );
+}
+
 export function clientIpAllowed(
   remoteAddress: string,
   allowedClientIps: ReadonlySet<string>,
 ) {
-  if (
-    remoteAddress === "127.0.0.1" ||
-    remoteAddress === "::1" ||
-    remoteAddress === "0:0:0:0:0:0:0:1"
-  ) {
-    return true;
-  }
+  if (isLoopbackAddress(remoteAddress)) return true;
   return allowedClientIps.size === 0 || allowedClientIps.has(remoteAddress);
 }
 
@@ -215,6 +218,56 @@ function noContent(
 ) {
   response.writeHead(204, headers);
   response.end();
+}
+
+function pairingPageDocument(
+  pairingCode: string,
+  pairingExpiresAt: number,
+  pairingCompleted: boolean,
+) {
+  const remainingSeconds = Math.max(
+    0,
+    Math.ceil((pairingExpiresAt - Date.now()) / 1_000),
+  );
+  const content = pairingCompleted
+    ? `<p class="status success">Pairing completed.</p>
+       <p>Return to the extension popup. It should connect automatically.</p>`
+    : remainingSeconds === 0
+      ? `<p class="status expired">This pairing code has expired.</p>
+         <p>Restart the companion to generate a new code.</p>`
+      : `<p>Enter this code in the extension popup:</p>
+         <div class="code" aria-label="Pairing code">${pairingCode}</div>
+         <p class="expires">Expires in ${remainingSeconds} seconds.</p>`;
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <meta http-equiv="refresh" content="5">
+    <title>Val Bridge pairing</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #10141c; color: #edf4ff; }
+      main { width: min(32rem, calc(100% - 2rem)); box-sizing: border-box; padding: 2rem; border: 1px solid #324052; border-radius: 1rem; background: #18202b; box-shadow: 0 1.25rem 4rem #0008; text-align: center; }
+      h1 { margin: 0 0 1rem; font-size: 1.5rem; }
+      p { color: #bac8da; line-height: 1.5; }
+      .code { margin: 1.25rem 0 .75rem; padding: 1rem; border-radius: .75rem; background: #0b1017; color: #8ed6ff; font: 700 2.5rem/1 ui-monospace, monospace; letter-spacing: .35em; text-indent: .35em; user-select: all; }
+      .expires { font-size: .875rem; }
+      .status { font-size: 1.125rem; font-weight: 700; }
+      .success { color: #8ee6ad; }
+      .expired { color: #ffb3b3; }
+      footer { margin-top: 1.5rem; color: #8190a3; font-size: .75rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Val Bridge pairing</h1>
+      ${content}
+      <footer>Available only on this computer. This page is never cached.</footer>
+    </main>
+  </body>
+</html>`;
 }
 
 async function readJsonBody(
@@ -521,6 +574,11 @@ export class ValBridgeServer {
         return;
       }
 
+      if (method === "GET" && url.pathname === "/pairing") {
+        this.handlePairingPage(request, response, url);
+        return;
+      }
+
       if (method === "POST" && url.pathname === "/bridge/pair") {
         await this.handlePair(request, response, corsHeaders);
         return;
@@ -613,6 +671,49 @@ export class ValBridgeServer {
       }
       json(response, error.status, openAIErrorBody(error));
     }
+  }
+
+  private handlePairingPage(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+  ) {
+    const remoteAddress = request.socket.remoteAddress ?? "";
+    const hostname = url.hostname.toLowerCase();
+    if (
+      !isLoopbackAddress(remoteAddress) ||
+      (hostname !== "127.0.0.1" &&
+        hostname !== "localhost" &&
+        hostname !== "[::1]") ||
+      request.headers.origin
+    ) {
+      throw new OpenAIHttpError(
+        403,
+        "pairing_page_loopback_only",
+        "The pairing page is available only as a local browser page.",
+        "permission_error",
+      );
+    }
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy":
+        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "cross-origin-opener-policy": "same-origin",
+      "cross-origin-resource-policy": "same-origin",
+      "permissions-policy":
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+    });
+    response.end(
+      pairingPageDocument(
+        this.pairingCode,
+        this.pairingExpiresAt,
+        this.pairingCompleted,
+      ),
+    );
   }
 
   private corsHeaders(

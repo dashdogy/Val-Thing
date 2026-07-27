@@ -1977,7 +1977,7 @@ async function stopValTask(taskId: string) {
 
 async function pairBridge(code: string, rawUrl: string) {
   if (!/^\d{6}$/.test(code)) {
-    throw new Error("Enter the six-digit code printed by the companion.");
+    throw new Error("Enter the six-digit code shown by the companion.");
   }
   const url = normalizeBridgeUrl(rawUrl);
   const controller = new AbortController();

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -2964,6 +2965,77 @@ test("pairing rejects a claimed extension ID that does not match Origin", async 
     ((await missingOrigin.json()) as { error: { code: string } }).error.code,
     "invalid_pairing_request",
   );
+});
+
+test("pairing page reveals only the short-lived code on loopback", async (t) => {
+  const configDirectory = await mkdtemp(
+    join(tmpdir(), "val-bridge-pair-page-"),
+  );
+  const server = await ValBridgeServer.create({
+    config: { port: 0, configDirectory },
+    quiet: true,
+  });
+  await server.listen();
+  t.after(async () => {
+    await server.close();
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
+  const page = await fetch(`${server.baseUrl}/pairing`);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type") ?? "", /^text\/html/);
+  assert.equal(page.headers.get("cache-control"), "no-store");
+  assert.equal(page.headers.get("x-frame-options"), "DENY");
+  assert.match(
+    page.headers.get("content-security-policy") ?? "",
+    /frame-ancestors 'none'/,
+  );
+  const pageHtml = await page.text();
+  assert.match(pageHtml, /Val Bridge pairing/);
+  assert.ok(pageHtml.includes(server.pairingCode));
+  const secrets = server.secrets.get();
+  assert.equal(pageHtml.includes(secrets.clientApiKey), false);
+  assert.equal(pageHtml.includes(secrets.bridgeSecret), false);
+
+  const crossOrigin = await fetch(`${server.baseUrl}/pairing`, {
+    headers: { origin: "https://example.com" },
+  });
+  assert.equal(crossOrigin.status, 403);
+  assert.equal((await crossOrigin.text()).includes(server.pairingCode), false);
+
+  const reboundHost = await new Promise<{ status: number; body: string }>(
+    (resolvePromise, rejectPromise) => {
+      const request = httpRequest(
+        `${server.baseUrl}/pairing`,
+        { headers: { host: "example.com" } },
+        (response) => {
+          response.setEncoding("utf8");
+          let body = "";
+          response.on("data", (chunk) => {
+            body += chunk;
+          });
+          response.on("end", () => {
+            resolvePromise({
+              status: response.statusCode ?? 0,
+              body,
+            });
+          });
+        },
+      );
+      request.once("error", rejectPromise);
+      request.end();
+    },
+  );
+  assert.equal(reboundHost.status, 403);
+  assert.equal(reboundHost.body.includes(server.pairingCode), false);
+
+  const paired = await pairingFetch(server, server.pairingCode);
+  assert.equal(paired.status, 200);
+  await paired.json();
+  const completedPage = await fetch(`${server.baseUrl}/pairing`);
+  const completedHtml = await completedPage.text();
+  assert.match(completedHtml, /Pairing completed/);
+  assert.equal(completedHtml.includes(server.pairingCode), false);
 });
 
 test("pairing codes are single-use", async (t) => {

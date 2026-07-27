@@ -2,6 +2,12 @@
 
 All notable changes to Val OpenAI Local Bridge are documented here.
 
+## Unreleased
+
+- Made Windows protocol launches open a loopback-only, non-cacheable pairing
+  page so the short-lived code remains visible even when the companion has no
+  console window.
+
 ## 0.1.12 - 2026-07-27
 
 - Closed relay cancellation races during model lookup, Val session setup, chat

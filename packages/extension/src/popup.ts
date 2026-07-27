@@ -580,7 +580,7 @@ pairingPanel.addEventListener("submit", async (event) => {
   showError();
   try {
     if (!/^\d{6}$/.test(codeInput.value.trim())) {
-      throw new Error("Enter the six-digit code printed by the companion.");
+      throw new Error("Enter the six-digit code shown by the companion.");
     }
     await message({
       type: "POPUP_PAIR",
