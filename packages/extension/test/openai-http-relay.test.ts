@@ -9,26 +9,32 @@ import {
 } from "../src/openai-http-relay.js";
 
 test("builds only same-origin Val OpenAI relay URLs", () => {
+  const url = valOpenAIHttpUrl(
+    "/v1/responses/resp_123",
+    "?include=reasoning.encrypted_content",
+  );
+  assert.equal(url.origin, "https://val.rmit.edu.au");
+  assert.equal(url.pathname, "/openai/v1/responses/resp_123");
   assert.equal(
-    valOpenAIHttpUrl(
-      "https://val.rmit.edu.au",
-      "/v1/responses/resp_123",
-      "?include=reasoning.encrypted_content",
-    ),
+    url.toString(),
     "https://val.rmit.edu.au/openai/v1/responses/resp_123?include=reasoning.encrypted_content",
   );
   assert.throws(
-    () =>
-      valOpenAIHttpUrl(
-        "https://val.rmit.edu.au",
-        "https://example.com/v1/models",
-      ),
+    () => valOpenAIHttpUrl("https://example.com/v1/models"),
     /Invalid/,
   );
-  assert.throws(
-    () =>
-      valOpenAIHttpUrl("https://val.rmit.edu.au", "/v1/files/%2e%2e/models"),
-    /Invalid/,
+  assert.throws(() => valOpenAIHttpUrl("/v1/files/%2e%2e/models"), /Invalid/);
+  assert.throws(() => valOpenAIHttpUrl("/v1/models?host=evil"), /Invalid/);
+  assert.throws(() => valOpenAIHttpUrl("/v1/models#evil"), /Invalid/);
+});
+
+test("canonicalizes encoded path and query components", () => {
+  assert.equal(
+    valOpenAIHttpUrl(
+      "/v1/responses/space%20id",
+      "?cursor=a%20b&include=reasoning.encrypted_content",
+    ).toString(),
+    "https://val.rmit.edu.au/openai/v1/responses/space%20id?cursor=a%20b&include=reasoning.encrypted_content",
   );
 });
 

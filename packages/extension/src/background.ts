@@ -760,7 +760,10 @@ async function startOpenAIHttp(
     return;
   }
 
-  const url = valOpenAIHttpUrl(VAL_ORIGIN, request.path, request.query ?? "");
+  const url = valOpenAIHttpUrl(request.path, request.query ?? "");
+  if (url.origin !== VAL_ORIGIN || !url.pathname.startsWith("/openai/v1/")) {
+    throw new Error("Invalid OpenAI relay URL.");
+  }
   const headers = openAIHttpRequestHeaders(request.headers, token);
   const canHaveBody = request.method !== "GET" && request.method !== "HEAD";
   const body =

@@ -22,6 +22,8 @@ const RESPONSE_HEADER_NAMES = new Set([
 
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const MAX_HEADER_LENGTH = 8 * 1024;
+const VAL_OPENAI_ORIGIN = "https://val.rmit.edu.au";
+const VAL_OPENAI_PATH_PREFIX = "/openai/v1/";
 
 function safeHeader(name: string, value: string) {
   return (
@@ -46,7 +48,16 @@ function responseHeaderAllowed(name: string) {
   );
 }
 
-export function valOpenAIHttpUrl(origin: string, path: string, query = "") {
+function canonicalQuery(query: string) {
+  if (!query) return "";
+  const entries: string[] = [];
+  new URLSearchParams(query.slice(1)).forEach((value, name) => {
+    entries.push(`${encodeURIComponent(name)}=${encodeURIComponent(value)}`);
+  });
+  return entries.join("&");
+}
+
+export function valOpenAIHttpUrl(path: string, query = "") {
   let decodedPath = "";
   try {
     decodedPath = decodeURIComponent(path);
@@ -55,8 +66,12 @@ export function valOpenAIHttpUrl(origin: string, path: string, query = "") {
   }
   if (
     !path.startsWith("/v1/") ||
+    path.includes("?") ||
+    path.includes("#") ||
     path.includes("\\") ||
     path.includes("\0") ||
+    decodedPath.includes("?") ||
+    decodedPath.includes("#") ||
     decodedPath.includes("\\") ||
     decodedPath
       .split("/")
@@ -65,9 +80,26 @@ export function valOpenAIHttpUrl(origin: string, path: string, query = "") {
   ) {
     throw new Error("Invalid OpenAI relay URL.");
   }
-  const url = new URL(`/openai${path}`, origin);
-  if (query) url.search = query;
-  return url.toString();
+
+  // Re-encode every caller-controlled component before it reaches fetch. The
+  // scheme, host, port, and /openai prefix are never supplied by the caller.
+  const canonicalPath = path
+    .split("/")
+    .map((segment) => encodeURIComponent(decodeURIComponent(segment)))
+    .join("/");
+  const normalizedQuery = canonicalQuery(query);
+  const url = new URL(
+    `${VAL_OPENAI_ORIGIN}/openai${canonicalPath}${
+      normalizedQuery ? `?${normalizedQuery}` : ""
+    }`,
+  );
+  if (
+    url.origin !== VAL_OPENAI_ORIGIN ||
+    !url.pathname.startsWith(VAL_OPENAI_PATH_PREFIX)
+  ) {
+    throw new Error("Invalid OpenAI relay URL.");
+  }
+  return url;
 }
 
 export function openAIHttpRequestHeaders(

@@ -72,5 +72,5 @@ jobs:
 
       - name: Verify the Responses and tool-use contract
         env:
-          OPENCODE_BIN: ${{ github.workspace }}/node_modules/opencode-ai/bin/opencode
+          OPENCODE_BIN: ${{ github.workspace }}/node_modules/.bin/opencode
         run: npm run verify:opencode
