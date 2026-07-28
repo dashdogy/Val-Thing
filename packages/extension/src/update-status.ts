@@ -7,6 +7,14 @@ export type ExtensionUpdateStatus = {
   message?: string;
 };
 
+export function actionBadgeText(
+  updateAvailable: boolean,
+  activeRequests: number,
+  idleText: string,
+) {
+  return updateAvailable ? "UP" : String(activeRequests || idleText);
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)

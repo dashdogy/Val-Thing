@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  actionBadgeText,
   createUpdateStatus,
   parseCompanionUpdateStatus,
   restoreUpdateStatus,
@@ -41,6 +42,9 @@ test("parses available and current companion update states", () => {
     ).state,
     "current",
   );
+  assert.equal(actionBadgeText(true, 2, "ON"), "UP");
+  assert.equal(actionBadgeText(false, 2, "ON"), "2");
+  assert.equal(actionBadgeText(false, 0, "ON"), "ON");
 });
 
 test("rejects mismatched versions and untrusted release URLs", () => {

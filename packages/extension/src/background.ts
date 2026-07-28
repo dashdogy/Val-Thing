@@ -68,6 +68,7 @@ import {
   type UsageOutcome,
 } from "./usage-stats.js";
 import {
+  actionBadgeText,
   createUpdateStatus,
   parseCompanionUpdateStatus,
   restoreUpdateStatus,
@@ -378,6 +379,15 @@ function updateStatus(patch: Partial<ExtensionStatus>) {
   requestAutomaticOpenCodeConfig();
 }
 
+function activeRequestCount() {
+  return new Set([
+    ...relayLifecycles.ids(),
+    ...[...pendingByRequest.values()]
+      .filter((pending) => !pending.finished)
+      .map((pending) => pending.requestId),
+  ]).size;
+}
+
 function updateBadge() {
   const updateAvailable = extensionUpdateStatus.state === "available";
   const ready =
@@ -385,17 +395,23 @@ function updateBadge() {
     extensionStatus.valSession &&
     extensionStatus.valSocket &&
     extensionStatus.compatible;
+  const activeRequests = activeRequestCount();
   void chrome.action.setBadgeText({
-    text: updateAvailable
-      ? "UP"
-      : ready
-        ? "ON"
-        : bridgeAuthenticated
-          ? "!"
-          : "",
+    text: actionBadgeText(
+      updateAvailable,
+      activeRequests,
+      ready ? "ON" : bridgeAuthenticated ? "!" : "",
+    ),
   });
   void chrome.action.setBadgeBackgroundColor({
     color: updateAvailable ? "#2563eb" : ready ? "#1f9d68" : "#d97706",
+  });
+  void chrome.action.setTitle({
+    title: updateAvailable
+      ? "Val OpenAI Bridge - Update available"
+      : activeRequests
+        ? `Val OpenAI Bridge - ${activeRequests} active ${activeRequests === 1 ? "request" : "requests"}`
+        : "Val OpenAI Bridge",
   });
 }
 
@@ -819,6 +835,7 @@ async function handleBridgeMessage(message: ServerToExtensionMessage) {
       break;
     case "relay.request":
       void handleRelayRequest(message.id, message.request);
+      updateBadge();
       break;
     case "relay.cancel":
       void cancelRelay(message.id);
@@ -848,6 +865,8 @@ async function handleRelayRequest(id: string, request: RelayRequest) {
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") return;
     sendBridge({ type: "relay.error", id, error: relayError(error) });
+  } finally {
+    updateBadge();
   }
 }
 
@@ -1931,6 +1950,7 @@ function emitBufferedClientToolResult(pending: PendingCompletion) {
 async function finishCompletion(pending: PendingCompletion) {
   if (pending.finished) return;
   pending.finished = true;
+  updateBadge();
   try {
     emitBufferedClientToolResult(pending);
   } catch (error) {
@@ -2045,6 +2065,7 @@ async function finishCompletion(pending: PendingCompletion) {
 function failCompletion(pending: PendingCompletion, error: RelayError) {
   if (pending.finished) return;
   pending.finished = true;
+  updateBadge();
   settlePendingRequest(pending, "failed");
   cleanupPending(pending);
   sendBridge({ type: "relay.error", id: pending.requestId, error });
@@ -2067,6 +2088,7 @@ async function cancelRelay(requestId: string) {
   if (pending && !pending.finished) {
     pending.cancelRequested = true;
     pending.finished = true;
+    updateBadge();
     settlePendingRequest(pending, "cancelled");
     if (pending.taskId) {
       await stopValTask(pending.taskId);
@@ -2501,12 +2523,7 @@ async function popupStatus(): Promise<PopupStatus> {
     },
     stats: {
       ...usageStats,
-      activeRequests: new Set([
-        ...relayLifecycles.ids(),
-        ...[...pendingByRequest.values()]
-          .filter((pending) => !pending.finished)
-          .map((pending) => pending.requestId),
-      ]).size,
+      activeRequests: activeRequestCount(),
     },
   };
 }
