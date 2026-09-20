@@ -22,8 +22,8 @@
     "dev": "npm run dev -w @val-bridge/server"
   },
   "devDependencies": {
-    "esbuild": "^0.28.1",
-    "prettier": "^3.9.6"
+    "esbuild": "^0.28.2",
+    "prettier": "^3.9.8"
   },
   "engines": {
     "node": ">=24"
